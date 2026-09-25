@@ -58,6 +58,8 @@ class PointNetPreprocessConfig:
     min_segment_pixels: int
     max_segment_extent_m: float
     robot_handle_radius_m: float
+    robot_handle_spread_m: float
+    robot_calibration_frames: int
     min_active_confidence: float
     min_target_confidence: float
     shard_size: int
@@ -80,6 +82,7 @@ class PointNetPreprocessConfig:
             self.future_horizon_frames,
             self.min_segment_pixels,
             self.shard_size,
+            self.robot_calibration_frames,
         )
         if min(integer_values) <= 0:
             raise ValueError("点数、horizon、像素阈值和 shard_size 必须为正")
@@ -88,6 +91,8 @@ class PointNetPreprocessConfig:
             raise ValueError("confidence 阈值必须位于 [0, 1]")
         if not self.cameras:
             raise ValueError("至少需要一个相机")
+        if self.robot_handle_radius_m <= 0 or self.robot_handle_spread_m <= 0:
+            raise ValueError("robot handle 半径和轨迹离散阈值必须为正")
         for mapping in (self.episodes_per_task, self.max_chunks):
             if not {"train", "val"}.issubset(mapping):
                 raise ValueError("episodes_per_task/max_chunks 必须包含 train 和 val")
@@ -194,12 +199,70 @@ class RLBenchPointNetPreprocessor:
         )
 
     @staticmethod
-    def _robot_handles(initial_segments: Mapping[int, Any], eef: np.ndarray, radius: float) -> set[int]:
-        return {
-            handle
-            for handle, segment in initial_segments.items()
-            if np.linalg.norm(segment.center - eef) <= radius
-        }
+    def _rotation_matrix(quaternion_xyzw: Sequence[float]) -> np.ndarray:
+        """将 xyzw 四元数转为旋转矩阵。"""
+        x, y, z, w = np.asarray(quaternion_xyzw, dtype=np.float64)
+        norm = np.linalg.norm((x, y, z, w))
+        if norm <= 1e-12:
+            raise ValueError("四元数退化")
+        x, y, z, w = np.asarray((x, y, z, w)) / norm
+        return np.asarray(
+            [
+                [
+                    1 - 2 * (y * y + z * z),
+                    2 * (x * y - z * w),
+                    2 * (x * z + y * w),
+                ],
+                [
+                    2 * (x * y + z * w),
+                    1 - 2 * (x * x + z * z),
+                    2 * (y * z - x * w),
+                ],
+                [
+                    2 * (x * z - y * w),
+                    2 * (y * z + x * w),
+                    1 - 2 * (x * x + y * y),
+                ],
+            ],
+            dtype=np.float64,
+        )
+
+    def _robot_handles(
+        self,
+        demo: Any,
+        calibration_frames: Sequence[int],
+        frame_segments: Mapping[int, Mapping[int, Any]],
+    ) -> set[int]:
+        """用接触前多帧轨迹识别跟随 EEF 刚性运动的机器人 segment。
+
+        位置先转到 EEF 局部系；机器人 link 的局部位置在多帧间稳定，
+        而作业物体在接触前不会刚性跟随 EEF。不依赖任务或 handle ID 硬编码。
+        """
+        local_tracks: dict[int, list[np.ndarray]] = defaultdict(list)
+        for frame in calibration_frames:
+            pose = np.asarray(demo[frame].gripper_pose, dtype=np.float64)
+            rotation = self._rotation_matrix(pose[3:7])
+            for handle, segment in frame_segments[frame].items():
+                local = rotation.T @ (segment.center - pose[:3])
+                local_tracks[handle].append(local)
+
+        minimum_observations = max(2, math.ceil(0.5 * len(calibration_frames)))
+        robot_handles = set()
+        for handle, track in local_tracks.items():
+            if len(track) < minimum_observations:
+                continue
+            values = np.stack(track)
+            median = np.median(values, axis=0)
+            distance = float(np.linalg.norm(median))
+            spread = float(
+                np.quantile(np.linalg.norm(values - median, axis=1), 0.90)
+            )
+            if (
+                distance <= self.config.robot_handle_radius_m
+                and spread <= self.config.robot_handle_spread_m
+            ):
+                robot_handles.add(handle)
+        return robot_handles
 
     def _active_candidate(
         self,
@@ -275,31 +338,20 @@ class RLBenchPointNetPreprocessor:
     def _make_chunk(
         self,
         *,
-        archive: zipfile.ZipFile,
         split: str,
         task: str,
         episode: int,
         demo: Any,
         text: str,
         variation: int,
-        prefix: str,
         anchor: EventAnchor,
         robot_handles: set[int],
+        frame_segments: Mapping[int, Mapping[int, Any]],
     ) -> _Chunk | None:
         frame = anchor.frame
         future_frame = min(len(demo) - 1, frame + self.config.future_horizon_frames)
-        current_segments = self.adapter._frame_segments(
-            archive,
-            prefix,
-            demo[frame],
-            frame,
-        )
-        future_segments = self.adapter._frame_segments(
-            archive,
-            prefix,
-            demo[future_frame],
-            future_frame,
-        )
+        current_segments = frame_segments[frame]
+        future_segments = frame_segments[future_frame]
         current_pose = np.asarray(demo[frame].gripper_pose, dtype=np.float64)
         future_pose = np.asarray(demo[future_frame].gripper_pose, dtype=np.float64)
         selected = self._active_candidate(
@@ -381,6 +433,8 @@ class RLBenchPointNetPreprocessor:
             "target_confidence": target_confidence,
             "target_valid": target_valid,
             "effect_valid": effect_valid,
+            "robot_handle_count": len(robot_handles),
+            "robot_filter_source": "precontact_eef_rigid_track",
             "gripper_state": "open" if float(demo[frame].gripper_open) >= 0.5 else "closed",
             "active_center": active.center.astype(float).tolist(),
             "active_extent": active.extent.astype(float).tolist(),
@@ -426,34 +480,59 @@ class RLBenchPointNetPreprocessor:
             archive,
             low_dim_member,
         )
-        initial_segments = self.adapter._frame_segments(
-            archive,
-            prefix,
-            demo[0],
-            0,
-        )
-        initial_eef = np.asarray(demo[0].gripper_pose[:3], dtype=np.float64)
-        robot_handles = self._robot_handles(
-            initial_segments,
-            initial_eef,
-            self.config.robot_handle_radius_m,
-        )
         anchors = detect_event_anchors(
             [float(observation.gripper_open) for observation in demo]
+        )
+        contact_frame = next(
+            (anchor.frame for anchor in anchors if anchor.phase == "contact"),
+            anchors[0].frame,
+        )
+        calibration_count = min(
+            self.config.robot_calibration_frames,
+            contact_frame + 1,
+        )
+        calibration_frames = sorted(
+            set(
+                np.linspace(
+                    0,
+                    contact_frame,
+                    calibration_count,
+                    dtype=np.int64,
+                ).tolist()
+            )
+        )
+        required_frames = set(calibration_frames)
+        for anchor in anchors:
+            required_frames.add(anchor.frame)
+            required_frames.add(
+                min(len(demo) - 1, anchor.frame + self.config.future_horizon_frames)
+            )
+        frame_segments = {
+            frame: self.adapter._frame_segments(
+                archive,
+                prefix,
+                demo[frame],
+                frame,
+            )
+            for frame in sorted(required_frames)
+        }
+        robot_handles = self._robot_handles(
+            demo,
+            calibration_frames,
+            frame_segments,
         )
         chunks = []
         for anchor in anchors:
             chunk = self._make_chunk(
-                archive=archive,
                 split=split,
                 task=task,
                 episode=episode,
                 demo=demo,
                 text=descriptions[0],
                 variation=variation,
-                prefix=prefix,
                 anchor=anchor,
                 robot_handles=robot_handles,
+                frame_segments=frame_segments,
             )
             if chunk is not None:
                 chunks.append(chunk)

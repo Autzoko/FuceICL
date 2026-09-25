@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
+import numpy as np
+
 from dev.pointnet.preprocess_rlbench import (
+    PointNetPreprocessConfig,
+    RLBenchPointNetPreprocessor,
     build_pair_labels,
     detect_event_anchors,
 )
@@ -48,6 +54,39 @@ class EventAnchorTest(unittest.TestCase):
         anchors = detect_event_anchors([1.0] * 21)
         self.assertEqual([anchor.frame for anchor in anchors], [5, 10, 15, 18])
         self.assertTrue(all(anchor.source == "time_fallback" for anchor in anchors))
+
+
+class RobotHandleFilterTest(unittest.TestCase):
+    def test_rigid_eef_track_is_robot_but_static_object_is_not(self) -> None:
+        config = PointNetPreprocessConfig.from_json(
+            Path("dev/pointnet/config/rlbench_smoke.json")
+        )
+        preprocessor = RLBenchPointNetPreprocessor(config)
+        frames = [0, 1, 2, 3]
+        eef_positions = [
+            np.asarray([0.00, 0.0, 0.8]),
+            np.asarray([0.05, 0.0, 0.8]),
+            np.asarray([0.10, 0.0, 0.8]),
+            np.asarray([0.15, 0.0, 0.8]),
+        ]
+        demo = [
+            SimpleNamespace(
+                gripper_pose=np.concatenate((position, [0.0, 0.0, 0.0, 1.0]))
+            )
+            for position in eef_positions
+        ]
+        frame_segments = {
+            frame: {
+                40: SimpleNamespace(center=eef_positions[frame] + [0.02, 0.0, 0.0]),
+                99: SimpleNamespace(center=np.asarray([0.20, 0.0, 0.8])),
+            }
+            for frame in frames
+        }
+
+        handles = preprocessor._robot_handles(demo, frames, frame_segments)
+
+        self.assertIn(40, handles)
+        self.assertNotIn(99, handles)
 
 
 class PairLabelTest(unittest.TestCase):

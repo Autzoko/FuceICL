@@ -1,5 +1,5 @@
 {
-  "schema_version": "pointnet-rlbench-smoke-v1",
+  "schema_version": "pointnet-rlbench-smoke-v2",
   "seed": 20260925,
   "cameras": ["front", "overhead"],
   "point_count": 128,
@@ -7,6 +7,8 @@
   "min_segment_pixels": 24,
   "max_segment_extent_m": 0.5,
   "robot_handle_radius_m": 0.22,
+  "robot_handle_spread_m": 0.025,
+  "robot_calibration_frames": 8,
   "min_active_confidence": 0.3,
   "min_target_confidence": 0.6,
   "shard_size": 16,
