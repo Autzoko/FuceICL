@@ -35,6 +35,21 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _distribution(values: list[float]) -> dict[str, float]:
+    """返回简洁分布摘要，便于审计自动标签的置信度。"""
+    if not values:
+        return {}
+    array = np.asarray(values, dtype=np.float64)
+    quantiles = np.quantile(array, (0.0, 0.05, 0.5, 0.95, 1.0))
+    return {
+        "min": float(quantiles[0]),
+        "p05": float(quantiles[1]),
+        "median": float(quantiles[2]),
+        "p95": float(quantiles[3]),
+        "max": float(quantiles[4]),
+    }
+
+
 def inspect_dataset(root: str | Path) -> dict[str, Any]:
     root = Path(root)
     expected = {}
@@ -82,16 +97,65 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
                     array_errors.append(f"{relative}:active_points_ndim")
                 if (shard["active_extent"] <= 0).any():
                     array_errors.append(f"{relative}:nonpositive_extent")
+        chunk_ids = {row["chunk_id"] for row in manifest}
+        pair_errors = []
+        positive_counts: Counter = Counter()
+        negative_coverage: Counter = Counter()
+        for pair in pairs:
+            query_id = pair["query_id"]
+            positive_ids = set(pair["positive_ids"])
+            if query_id not in chunk_ids:
+                pair_errors.append(f"unknown_query:{query_id}")
+            missing = positive_ids - chunk_ids
+            if missing:
+                pair_errors.append(f"unknown_positive:{query_id}:{sorted(missing)}")
+            positive_counts[len(positive_ids)] += 1
+            for category, identifiers in pair["hard_negatives"].items():
+                negative_ids = set(identifiers)
+                missing = negative_ids - chunk_ids
+                if missing:
+                    pair_errors.append(
+                        f"unknown_negative:{query_id}:{category}:{sorted(missing)}"
+                    )
+                overlap = positive_ids & negative_ids
+                if overlap:
+                    pair_errors.append(
+                        f"positive_negative_overlap:{query_id}:{category}:{sorted(overlap)}"
+                    )
+                if negative_ids:
+                    negative_coverage[category] += 1
         report["splits"][split] = {
             "chunks": len(manifest),
             "pairs": len(pairs),
             "queries_with_positive": sum(bool(row["positive_ids"]) for row in pairs),
+            "positive_count_histogram": {
+                str(count): frequency
+                for count, frequency in sorted(positive_counts.items())
+            },
+            "hard_negative_query_coverage": dict(sorted(negative_coverage.items())),
             "tasks": dict(sorted(Counter(row["task"] for row in manifest).items())),
             "phases": dict(sorted(Counter(row["phase"] for row in manifest).items())),
+            "phase_sources": dict(
+                sorted(Counter(row["phase_source"] for row in manifest).items())
+            ),
+            "target_valid": sum(bool(row["target_valid"]) for row in manifest),
+            "effect_valid": sum(bool(row["effect_valid"]) for row in manifest),
+            "active_confidence": _distribution(
+                [float(row["active_confidence"]) for row in manifest]
+            ),
+            "target_confidence": _distribution(
+                [
+                    float(row["target_confidence"])
+                    for row in manifest
+                    if row["target_valid"]
+                ]
+            ),
             "array_errors": array_errors,
+            "pair_errors": pair_errors,
         }
     report["valid"] = not checksum_errors and all(
-        not values["array_errors"] for values in report["splits"].values()
+        not values["array_errors"] and not values["pair_errors"]
+        for values in report["splits"].values()
     )
     return report
 
