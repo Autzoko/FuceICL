@@ -59,3 +59,19 @@ sbatch src/scripts/hpc/preprocess_rlbench_pointnet.slurm \
 
 Slurm job 使用 CPU，不申请或占用 GPU，也不会操作其他队列任务。训练脚本将在数据审计通过
 后单独提交。
+
+## Retriever 训练
+
+`dataset.py` 从 pair labels 中确定性采样跨 episode positive 和四类 hard negative。
+`retriever_model.py` 共享 Tiny PointNet++ 编码 active/target cloud，再融合 layout、
+object-relative EEF pose/velocity 与 gripper width。未来 action/effect 只作为辅助监督。
+
+```bash
+sbatch src/scripts/hpc/train_tiny_pointnetpp.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1
+```
+
+训练每个 epoch 报告 hard-triplet accuracy，以及 global/same-task Recall@1/4/10 和
+MRR。checkpoint 保存数据 summary hash、Git commit、state normalization 和完整配置。

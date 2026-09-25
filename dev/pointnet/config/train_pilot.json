@@ -1,0 +1,20 @@
+{
+  "seed": 20260925,
+  "epochs": 20,
+  "batch_size": 32,
+  "num_workers": 4,
+  "shard_cache_size": 4,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "triplet_margin": 0.15,
+  "alignment_weight": 0.05,
+  "phase_weight": 0.1,
+  "future_weight": 0.2,
+  "gradient_clip_norm": 1.0,
+  "point_jitter_std_m": 0.002,
+  "point_jitter_clip_m": 0.01,
+  "point_dropout_probability": 0.1,
+  "amp": true,
+  "eval_batch_size": 64,
+  "recall_k": [1, 4, 10]
+}
