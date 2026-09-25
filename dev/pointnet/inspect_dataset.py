@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, defaultdict
 import hashlib
 import json
 from pathlib import Path
@@ -135,6 +135,17 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
             if row["target_valid"] and row["target_handle"] in persistent_handles:
                 semantic_errors.append(
                     f"persistent_target_handle:{row['chunk_id']}:{row['target_handle']}"
+                )
+        episode_active_handles: dict[tuple[str, int], set[int]] = defaultdict(set)
+        for row in manifest:
+            if row.get("active_handle_source") == "contact_locked":
+                episode_active_handles[(row["task"], row["episode"])].add(
+                    row["active_handle"]
+                )
+        for (task, episode), handles in episode_active_handles.items():
+            if len(handles) > 1:
+                semantic_errors.append(
+                    f"contact_lock_violation:{task}:episode{episode}:{sorted(handles)}"
                 )
         report["splits"][split] = {
             "chunks": len(manifest),

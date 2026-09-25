@@ -144,6 +144,7 @@ def diagnose(
             "robot_handle_spread_m": config.robot_handle_spread_m,
             "robot_calibration_frames": config.robot_calibration_frames,
             "shared_handle_task_fraction": config.shared_handle_task_fraction,
+            "shared_handle_episodes": config.shared_handle_episodes,
         },
         "handles": handles,
     }

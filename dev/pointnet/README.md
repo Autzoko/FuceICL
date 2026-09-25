@@ -13,9 +13,10 @@
 - 每物体 512 点，front + overhead partial cloud；
 - phase 优先由 gripper close/open 事件定位，无事件时显式记录 `time_fallback`；
 - 机器人 segment 由“跨任务高频公共 handle + 接触前 EEF 局部系刚性轨迹”
-  联合识别，不硬编码 handle ID；
+  联合识别，不硬编码 handle ID；公共 handle 校准默认覆盖每任务两个 episode；
 - active object 从排除机器人后的 segment 中，用 EEF 距离、segment motion 与
-  EEF-motion coupling 联合打分；
+  EEF-motion coupling 联合打分；存在 gripper event 时从 contact 锁定 active handle，
+  后续 phase 不允许切换到附近物体；
 - target 仅在 active 确实移动、target 稳定且终点接近时保存；
 - 低置信 active-object chunk 直接丢弃；
 - 输出 sharded NPZ、manifest、pair labels、summary 和 SHA-256。
@@ -53,7 +54,7 @@ conda env create -f dev/pointnet/environment-jubail.yml
 
 sbatch src/scripts/hpc/preprocess_rlbench_pointnet.slurm \
   "$PWD" \
-  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v3
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4
 ```
 
 Slurm job 使用 CPU，不申请或占用 GPU，也不会操作其他队列任务。训练脚本将在数据审计通过

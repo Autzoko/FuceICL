@@ -61,6 +61,7 @@ class PointNetPreprocessConfig:
     robot_handle_spread_m: float
     robot_calibration_frames: int
     shared_handle_task_fraction: float
+    shared_handle_episodes: int
     min_active_confidence: float
     min_target_confidence: float
     shard_size: int
@@ -84,6 +85,7 @@ class PointNetPreprocessConfig:
             self.min_segment_pixels,
             self.shard_size,
             self.robot_calibration_frames,
+            self.shared_handle_episodes,
         )
         if min(integer_values) <= 0:
             raise ValueError("点数、horizon、像素阈值和 shard_size 必须为正")
@@ -305,21 +307,21 @@ class RLBenchPointNetPreprocessor:
                 members = self.adapter._episode_members(archive)
                 if not members:
                     continue
-                _, member = members[0]
-                demo, _, _, prefix = self.adapter._read_episode(archive, member)
-                anchors = detect_event_anchors(
-                    [float(observation.gripper_open) for observation in demo]
-                )
                 visible_handles = set()
-                for frame in self._calibration_frames(anchors):
-                    visible_handles.update(
-                        self.adapter._frame_segments(
-                            archive,
-                            prefix,
-                            demo[frame],
-                            frame,
-                        )
+                for _, member in members[: self.config.shared_handle_episodes]:
+                    demo, _, _, prefix = self.adapter._read_episode(archive, member)
+                    anchors = detect_event_anchors(
+                        [float(observation.gripper_open) for observation in demo]
                     )
+                    for frame in self._calibration_frames(anchors):
+                        visible_handles.update(
+                            self.adapter._frame_segments(
+                                archive,
+                                prefix,
+                                demo[frame],
+                                frame,
+                            )
+                        )
                 task_counts.update(visible_handles)
         minimum_tasks = math.ceil(
             self.config.shared_handle_task_fraction * len(tasks)
@@ -339,11 +341,14 @@ class RLBenchPointNetPreprocessor:
         current_eef: np.ndarray,
         future_eef: np.ndarray,
         phase: str,
+        preferred_handle: int | None = None,
     ) -> tuple[int, float] | None:
         scored = []
         eef_motion = future_eef - current_eef
         for handle, segment in current_segments.items():
             if handle in robot_handles:
+                continue
+            if preferred_handle is not None and handle != preferred_handle:
                 continue
             distance = float(np.linalg.norm(segment.center - current_eef))
             distance_score = math.exp(-distance / 0.18)
@@ -415,6 +420,7 @@ class RLBenchPointNetPreprocessor:
         robot_handles: set[int],
         persistent_handles: set[int],
         frame_segments: Mapping[int, Mapping[int, Any]],
+        episode_active_handle: int | None,
     ) -> _Chunk | None:
         frame = anchor.frame
         future_frame = min(len(demo) - 1, frame + self.config.future_horizon_frames)
@@ -429,6 +435,7 @@ class RLBenchPointNetPreprocessor:
             current_pose[:3],
             future_pose[:3],
             anchor.phase,
+            episode_active_handle,
         )
         if selected is None:
             return None
@@ -496,6 +503,11 @@ class RLBenchPointNetPreprocessor:
             "phase_source": anchor.source,
             "text": text,
             "active_handle": int(active_handle),
+            "active_handle_source": (
+                "contact_locked"
+                if episode_active_handle is not None
+                else "per_frame"
+            ),
             "target_handle": int(target_handle),
             "active_confidence": active_confidence,
             "target_confidence": target_confidence,
@@ -572,6 +584,36 @@ class RLBenchPointNetPreprocessor:
         robot_handles = persistent_handles | self._robot_handles(
             demo, calibration_frames, frame_segments
         )
+        episode_active_handle = None
+        contact_anchor = next(
+            (
+                anchor
+                for anchor in anchors
+                if anchor.phase == "contact" and anchor.source == "gripper_event"
+            ),
+            None,
+        )
+        if contact_anchor is not None:
+            frame = contact_anchor.frame
+            future_frame = min(
+                len(demo) - 1,
+                frame + self.config.future_horizon_frames,
+            )
+            current_pose = np.asarray(demo[frame].gripper_pose, dtype=np.float64)
+            future_pose = np.asarray(
+                demo[future_frame].gripper_pose,
+                dtype=np.float64,
+            )
+            selected = self._active_candidate(
+                frame_segments[frame],
+                frame_segments[future_frame],
+                robot_handles,
+                current_pose[:3],
+                future_pose[:3],
+                contact_anchor.phase,
+            )
+            if selected is not None:
+                episode_active_handle = selected[0]
         chunks = []
         for anchor in anchors:
             chunk = self._make_chunk(
@@ -585,6 +627,7 @@ class RLBenchPointNetPreprocessor:
                 robot_handles=robot_handles,
                 persistent_handles=persistent_handles,
                 frame_segments=frame_segments,
+                episode_active_handle=episode_active_handle,
             )
             if chunk is not None:
                 chunks.append(chunk)
