@@ -102,6 +102,8 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
         chunk_ids = {row["chunk_id"] for row in manifest}
         pair_errors = []
         semantic_errors = []
+        if len(chunk_ids) != len(manifest):
+            semantic_errors.append("duplicate_chunk_id")
         positive_counts: Counter = Counter()
         negative_coverage: Counter = Counter()
         for pair in pairs:
@@ -137,11 +139,21 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
                     f"persistent_target_handle:{row['chunk_id']}:{row['target_handle']}"
                 )
         episode_active_handles: dict[tuple[str, int], set[int]] = defaultdict(set)
+        episode_chunk_counts: Counter = Counter()
+        active_handle_tasks: dict[int, set[str]] = defaultdict(set)
         for row in manifest:
-            if row.get("active_handle_source") == "contact_locked":
-                episode_active_handles[(row["task"], row["episode"])].add(
-                    row["active_handle"]
+            episode_key = (row["task"], row["episode"])
+            episode_chunk_counts[episode_key] += 1
+            active_handle_tasks[row["active_handle"]].add(row["task"])
+            if (
+                row["phase_source"] == "gripper_event"
+                and row.get("active_handle_source") != "contact_locked"
+            ):
+                semantic_errors.append(
+                    f"unlocked_event_handle:{row['chunk_id']}"
                 )
+            if row.get("active_handle_source") == "contact_locked":
+                episode_active_handles[episode_key].add(row["active_handle"])
         for (task, episode), handles in episode_active_handles.items():
             if len(handles) > 1:
                 semantic_errors.append(
@@ -160,6 +172,27 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
             "phases": dict(sorted(Counter(row["phase"] for row in manifest).items())),
             "phase_sources": dict(
                 sorted(Counter(row["phase_source"] for row in manifest).items())
+            ),
+            "active_handle_sources": dict(
+                sorted(
+                    Counter(
+                        row.get("active_handle_source", "unknown")
+                        for row in manifest
+                    ).items()
+                )
+            ),
+            "episode_chunk_count_histogram": {
+                str(count): frequency
+                for count, frequency in sorted(
+                    Counter(episode_chunk_counts.values()).items()
+                )
+            },
+            "active_handles_by_task_count": dict(
+                sorted(
+                    Counter(
+                        len(tasks) for tasks in active_handle_tasks.values()
+                    ).items()
+                )
             ),
             "target_valid": sum(bool(row["target_valid"]) for row in manifest),
             "effect_valid": sum(bool(row["effect_valid"]) for row in manifest),
