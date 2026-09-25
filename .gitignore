@@ -1,0 +1,99 @@
+# macOS / Windows
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-wheel-metadata/
+
+# Local environments and secrets
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.env
+.env.*
+!.env.example
+
+# Notebook state
+.ipynb_checkpoints/
+
+# Local agent notes and scratch files
+_notes/
+tmp/
+temp/
+*.tmp
+
+# Downloaded datasets and generated dataset artifacts
+data/raw/
+data/interim/
+data/processed/
+data/external/
+data/downloads/
+data/**/raw/
+data/DROID/droid_language_annotations.json
+*.bag
+*.db3
+*.mcap
+
+# Model checkpoints and exported weights
+lib/**/checkpoint/
+lib/**/.cache/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+
+# Generated evaluation and experiment outputs
+dev/**/cache/
+dev/**/results/
+lib/**/evaluation_data/
+lib/**/results/
+log/
+logs/
+runs/
+outputs/
+wandb/
+mlruns/
+tensorboard/
+multirun/
+.hydra/
+
+# Native build and profiling artifacts
+*.so
+*.dylib
+*.prof
+*.lprof
+.cache/

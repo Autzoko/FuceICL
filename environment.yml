@@ -1,0 +1,10 @@
+name: FuseICL
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - "gliner2[local]==2.0.0"

@@ -1,0 +1,37 @@
+{
+  "schema_version": "text-retrieval-v1-2026-09-25",
+  "thresholds": {
+    "classification": 0.15,
+    "operation_span": 0.15,
+    "object_span": 0.15
+  },
+  "goal_operations": {
+    "pick": "the final goal only grasps or lifts an object while keeping it held, with no destination specified",
+    "remove": "the final goal detaches or takes an object out, off, or away from a source, without a later destination",
+    "place": "the final goal moves a discrete object to a destination, container, surface, or spatial position; includes put, set, stack, and deposit; the moved item remains intact",
+    "move": "the final goal changes an object's position or arrangement but the instruction does not specify whether it is grasped or pushed",
+    "push": "the final goal translates or slides a non-button object by sustained pushing contact",
+    "open": "the final goal makes a door, drawer, lid, faucet, or articulated mechanism open or on, even when achieved by operating a control",
+    "close": "the final goal makes a door, drawer, lid, faucet, or articulated mechanism closed or off",
+    "insert": "the final goal tightly fits or plugs an object into a slot, socket, hole, or fixture; not loose placement in a container",
+    "rotate": "the final goal turns, twists, or rotates an object or control",
+    "pour": "the final goal transfers liquid, granular material, or loose contents by tilting a source container; not putting the container itself somewhere",
+    "wipe": "the final goal cleans or wipes a surface using a cloth, sponge, or tool",
+    "fold": "the final goal folds or rolls a deformable item",
+    "unfold": "the final goal unfolds, unrolls, or spreads a deformable item",
+    "hang": "the final goal suspends or drapes an object from a hook, rack, rod, or support",
+    "press": "the final goal presses or activates a button, key, or switch instead of moving an ordinary object",
+    "pull": "the final goal pulls an object without opening an articulated mechanism",
+    "other": "the final goal is not covered by any other category"
+  },
+  "entities": {
+    "operation": {
+      "label": "operation phrase",
+      "description": "a verb phrase explicitly describing a physical robot action, such as pick up, remove, place, move, push, open, close, insert, rotate, pour, wipe, fold, unfold, hang, press, or pull; extract every action in a multi-step instruction"
+    },
+    "object": {
+      "label": "task object",
+      "description": "every concrete object or object part relevant to the robot task, including manipulated items, targets, containers, contents, tools, supports, surfaces, fixtures, buttons, and appliances; preserve identifying modifiers such as color, size, material, and location; exclude pronouns and directions"
+    }
+  }
+}
