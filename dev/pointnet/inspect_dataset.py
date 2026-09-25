@@ -52,6 +52,8 @@ def _distribution(values: list[float]) -> dict[str, float]:
 
 def inspect_dataset(root: str | Path) -> dict[str, Any]:
     root = Path(root)
+    summary = json.loads(root.joinpath("summary.json").read_text())
+    persistent_handles = set(summary.get("persistent_excluded_handles", ()))
     expected = {}
     for line in root.joinpath("SHA256SUMS").read_text().splitlines():
         digest, relative = line.split("  ", 1)
@@ -99,6 +101,7 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
                     array_errors.append(f"{relative}:nonpositive_extent")
         chunk_ids = {row["chunk_id"] for row in manifest}
         pair_errors = []
+        semantic_errors = []
         positive_counts: Counter = Counter()
         negative_coverage: Counter = Counter()
         for pair in pairs:
@@ -124,6 +127,15 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
                     )
                 if negative_ids:
                     negative_coverage[category] += 1
+        for row in manifest:
+            if row["active_handle"] in persistent_handles:
+                semantic_errors.append(
+                    f"persistent_active_handle:{row['chunk_id']}:{row['active_handle']}"
+                )
+            if row["target_valid"] and row["target_handle"] in persistent_handles:
+                semantic_errors.append(
+                    f"persistent_target_handle:{row['chunk_id']}:{row['target_handle']}"
+                )
         report["splits"][split] = {
             "chunks": len(manifest),
             "pairs": len(pairs),
@@ -152,9 +164,12 @@ def inspect_dataset(root: str | Path) -> dict[str, Any]:
             ),
             "array_errors": array_errors,
             "pair_errors": pair_errors,
+            "semantic_errors": semantic_errors,
         }
     report["valid"] = not checksum_errors and all(
-        not values["array_errors"] and not values["pair_errors"]
+        not values["array_errors"]
+        and not values["pair_errors"]
+        and not values["semantic_errors"]
         for values in report["splits"].values()
     )
     return report

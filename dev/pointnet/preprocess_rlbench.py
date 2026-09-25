@@ -60,6 +60,7 @@ class PointNetPreprocessConfig:
     robot_handle_radius_m: float
     robot_handle_spread_m: float
     robot_calibration_frames: int
+    shared_handle_task_fraction: float
     min_active_confidence: float
     min_target_confidence: float
     shard_size: int
@@ -93,6 +94,8 @@ class PointNetPreprocessConfig:
             raise ValueError("至少需要一个相机")
         if self.robot_handle_radius_m <= 0 or self.robot_handle_spread_m <= 0:
             raise ValueError("robot handle 半径和轨迹离散阈值必须为正")
+        if not 0.0 < self.shared_handle_task_fraction <= 1.0:
+            raise ValueError("shared_handle_task_fraction 必须位于 (0, 1]")
         for mapping in (self.episodes_per_task, self.max_chunks):
             if not {"train", "val"}.issubset(mapping):
                 raise ValueError("episodes_per_task/max_chunks 必须包含 train 和 val")
@@ -264,6 +267,70 @@ class RLBenchPointNetPreprocessor:
                 robot_handles.add(handle)
         return robot_handles
 
+    def _calibration_frames(
+        self,
+        anchors: Sequence[EventAnchor],
+    ) -> list[int]:
+        contact_frame = next(
+            (anchor.frame for anchor in anchors if anchor.phase == "contact"),
+            anchors[0].frame,
+        )
+        count = min(self.config.robot_calibration_frames, contact_frame + 1)
+        return sorted(
+            set(
+                np.linspace(
+                    0,
+                    contact_frame,
+                    count,
+                    dtype=np.int64,
+                ).tolist()
+            )
+        )
+
+    def discover_persistent_handles(
+        self,
+        data_root: Path,
+        *,
+        split: str = "train",
+    ) -> tuple[set[int], dict[int, int]]:
+        """从多任务 mask 中自动发现 Panda/公共场景 handle。
+
+        RLBench 先加载机器人再加载 task scene，因此机器人和公共场景
+        handle 会跨大多数任务稳定出现。阈值由任务占比定义，不写死 ID。
+        """
+        tasks = _available_tasks(data_root, split, ())
+        task_counts: Counter = Counter()
+        for task in tasks:
+            with zipfile.ZipFile(data_root / split / f"{task}.zip") as archive:
+                members = self.adapter._episode_members(archive)
+                if not members:
+                    continue
+                _, member = members[0]
+                demo, _, _, prefix = self.adapter._read_episode(archive, member)
+                anchors = detect_event_anchors(
+                    [float(observation.gripper_open) for observation in demo]
+                )
+                visible_handles = set()
+                for frame in self._calibration_frames(anchors):
+                    visible_handles.update(
+                        self.adapter._frame_segments(
+                            archive,
+                            prefix,
+                            demo[frame],
+                            frame,
+                        )
+                    )
+                task_counts.update(visible_handles)
+        minimum_tasks = math.ceil(
+            self.config.shared_handle_task_fraction * len(tasks)
+        )
+        persistent = {
+            handle
+            for handle, task_count in task_counts.items()
+            if task_count >= minimum_tasks
+        }
+        return persistent, dict(task_counts)
+
     def _active_candidate(
         self,
         current_segments: Mapping[int, Any],
@@ -346,6 +413,7 @@ class RLBenchPointNetPreprocessor:
         variation: int,
         anchor: EventAnchor,
         robot_handles: set[int],
+        persistent_handles: set[int],
         frame_segments: Mapping[int, Mapping[int, Any]],
     ) -> _Chunk | None:
         frame = anchor.frame
@@ -434,7 +502,8 @@ class RLBenchPointNetPreprocessor:
             "target_valid": target_valid,
             "effect_valid": effect_valid,
             "robot_handle_count": len(robot_handles),
-            "robot_filter_source": "precontact_eef_rigid_track",
+            "persistent_handle_count": len(persistent_handles),
+            "robot_filter_source": "cross_task_persistent+precontact_eef_rigid",
             "gripper_state": "open" if float(demo[frame].gripper_open) >= 0.5 else "closed",
             "active_center": active.center.astype(float).tolist(),
             "active_extent": active.extent.astype(float).tolist(),
@@ -475,6 +544,7 @@ class RLBenchPointNetPreprocessor:
         task: str,
         episode: int,
         low_dim_member: str,
+        persistent_handles: set[int],
     ) -> list[_Chunk]:
         demo, descriptions, variation, prefix = self.adapter._read_episode(
             archive,
@@ -483,24 +553,7 @@ class RLBenchPointNetPreprocessor:
         anchors = detect_event_anchors(
             [float(observation.gripper_open) for observation in demo]
         )
-        contact_frame = next(
-            (anchor.frame for anchor in anchors if anchor.phase == "contact"),
-            anchors[0].frame,
-        )
-        calibration_count = min(
-            self.config.robot_calibration_frames,
-            contact_frame + 1,
-        )
-        calibration_frames = sorted(
-            set(
-                np.linspace(
-                    0,
-                    contact_frame,
-                    calibration_count,
-                    dtype=np.int64,
-                ).tolist()
-            )
-        )
+        calibration_frames = self._calibration_frames(anchors)
         required_frames = set(calibration_frames)
         for anchor in anchors:
             required_frames.add(anchor.frame)
@@ -516,10 +569,8 @@ class RLBenchPointNetPreprocessor:
             )
             for frame in sorted(required_frames)
         }
-        robot_handles = self._robot_handles(
-            demo,
-            calibration_frames,
-            frame_segments,
+        robot_handles = persistent_handles | self._robot_handles(
+            demo, calibration_frames, frame_segments
         )
         chunks = []
         for anchor in anchors:
@@ -532,6 +583,7 @@ class RLBenchPointNetPreprocessor:
                 variation=variation,
                 anchor=anchor,
                 robot_handles=robot_handles,
+                persistent_handles=persistent_handles,
                 frame_segments=frame_segments,
             )
             if chunk is not None:
@@ -731,6 +783,7 @@ def preprocess_split(
     root: Path,
     output: Path,
     split: str,
+    persistent_handles: set[int],
 ) -> tuple[list[dict[str, Any]], dict[str, str], Counter]:
     config = preprocessor.config
     tasks = _available_tasks(root, split, config.tasks)
@@ -755,6 +808,7 @@ def preprocess_split(
                 task=task,
                 episode=episode,
                 low_dim_member=member,
+                persistent_handles=persistent_handles,
             )
             stats["chunks_accepted"] += len(chunks)
             stats["chunks_rejected"] += len(PHASES) - len(chunks)
@@ -788,12 +842,21 @@ def run_preprocessing(
         "splits": {},
     }
     try:
+        persistent_handles, handle_task_counts = (
+            preprocessor.discover_persistent_handles(data_root)
+        )
+        summary["persistent_excluded_handles"] = sorted(persistent_handles)
+        summary["persistent_handle_task_counts"] = {
+            str(handle): handle_task_counts[handle]
+            for handle in sorted(persistent_handles)
+        }
         for split in ("train", "val"):
             metadata, checksums, stats = preprocess_split(
                 preprocessor,
                 data_root,
                 temporary,
                 split,
+                persistent_handles,
             )
             manifest_path = temporary / f"manifest-{split}.jsonl"
             pairs_path = temporary / f"pairs-{split}.jsonl"
