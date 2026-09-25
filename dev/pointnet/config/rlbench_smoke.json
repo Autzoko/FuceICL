@@ -1,0 +1,22 @@
+{
+  "schema_version": "pointnet-rlbench-smoke-v1",
+  "seed": 20260925,
+  "cameras": ["front", "overhead"],
+  "point_count": 128,
+  "future_horizon_frames": 12,
+  "min_segment_pixels": 24,
+  "max_segment_extent_m": 0.5,
+  "robot_handle_radius_m": 0.22,
+  "min_active_confidence": 0.3,
+  "min_target_confidence": 0.6,
+  "shard_size": 16,
+  "episodes_per_task": {
+    "train": 2,
+    "val": 1
+  },
+  "max_chunks": {
+    "train": 16,
+    "val": 8
+  },
+  "tasks": ["close_jar", "slide_block_to_color_target"]
+}

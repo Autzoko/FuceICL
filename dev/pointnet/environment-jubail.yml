@@ -1,0 +1,14 @@
+name: FuseICL-pointnet
+
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - numpy=1.26
+  - pillow
+  - pytorch=2.1
+  - pytorch-cuda=11.8
+  - pip
