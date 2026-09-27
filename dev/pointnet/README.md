@@ -75,3 +75,23 @@ sbatch src/scripts/hpc/train_tiny_pointnetpp.slurm \
 
 训练每个 epoch 报告 hard-triplet accuracy，以及 global/same-task Recall@1/4/10 和
 MRR。checkpoint 保存数据 summary hash、Git commit、state normalization 和完整配置。
+
+## 统一对比评测
+
+`compare_retrievers.py` 在同一个 val split、相同候选池、相同 pair labels 上比较：
+
+- 只使用当前观测的显式几何 RBF 强基线；
+- Tiny PointNet++ 最佳 checkpoint；
+- 固定 PointNet 权重为 0.25、0.50、0.75 的分数融合。
+
+几何 RBF 尺度仅由 train positives 校准，禁止使用验证标签选尺度；主融合结果固定为 0.50。
+评测分别报告 global 与模拟文本初筛后的 same-task Recall@1/4/10、MRR、四类 hard-negative
+intrusion，以及相对显式基线的配对 bootstrap Recall@4 置信区间。
+
+```bash
+sbatch src/scripts/hpc/compare_pointnet_retrievers.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/pointnet_pilot_v1.json
+```
