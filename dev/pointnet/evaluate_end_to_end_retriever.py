@@ -6,6 +6,7 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+import subprocess
 import time
 from typing import Any, Mapping, Sequence
 
@@ -47,13 +48,27 @@ class EndToEndConfig:
             self.bootstrap_samples,
         )
         if min(positive) <= 0 or self.num_workers < 0:
-            raise ValueError("budgets/K/batch/bootstrap 必须为正，worker 不能为负")
+            raise ValueError(
+                "budgets/K/batch/bootstrap 必须为正，worker 不能为负"
+            )
         for name, value in (
             ("text_score_weight", self.text_score_weight),
             ("pointnet_fusion_weight", self.pointnet_fusion_weight),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} 必须位于 [0, 1]")
+
+
+def _git_commit(root: Path) -> str:
+    """记录评估代码版本；失败时显式返回 unknown。"""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
 def _load_text_scores(
@@ -197,7 +212,9 @@ def evaluate_pipeline_scores(
         eligible += 1
         candidate_mask = base_mask & text_mask[query_index]
         candidate_counts.append(int(candidate_mask.sum()))
-        stage1_positive_hits += int(any(bool(candidate_mask[index]) for index in positives))
+        stage1_positive_hits += int(
+            any(bool(candidate_mask[index]) for index in positives)
+        )
         stage1_task_hits += int(
             any(
                 bool(candidate_mask[index])
@@ -427,6 +444,7 @@ def evaluate(
             "epoch": checkpoint["epoch"],
             "git_commit": checkpoint.get("git_commit"),
         },
+        "evaluator_git_commit": _git_commit(Path.cwd()),
         "text_artifact": {
             "path": str(text_scores_path),
             "metadata": text_metadata,
