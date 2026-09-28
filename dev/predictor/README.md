@@ -22,3 +22,17 @@ sbatch src/scripts/hpc/train_open_loop_predictor.slurm \
   /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
   /scratch/ll5582/data/RLBench/training/open_loop_predictor_v1
 ```
+
+## H-step action chunk 数据
+
+E3 使用查询时刻末端坐标系中的累计动作：每个 token 是
+`[local_translation(3), local_axis_angle(3), gripper_open_target]`。`H=6`、帧间隔为
+2，因此最后一个 token 与现有 12-frame 聚合监督位于同一时刻，可直接执行一致性审计。
+相对同一查询位姿的累计表示避免逐步积分误差，并对全局刚体坐标变换保持不变。
+
+```bash
+sbatch src/scripts/hpc/preprocess_rlbench_action_chunks.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/processed/action_chunk_pilot_v1
+```

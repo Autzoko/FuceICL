@@ -1,0 +1,6 @@
+{
+  "schema_version": "rlbench-action-chunk-pilot-v1",
+  "horizon": 6,
+  "frame_stride": 2,
+  "shard_size": 512
+}
