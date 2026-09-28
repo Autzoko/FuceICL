@@ -95,3 +95,22 @@ sbatch src/scripts/hpc/compare_pointnet_retrievers.slurm \
   /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
   /scratch/ll5582/data/RLBench/evaluation/pointnet_pilot_v1.json
 ```
+
+## 端到端文本候选池
+
+先在本地冻结的 GLiNER2+MiniLM 上为唯一 instruction groups 预计算可审计分数，再将小型
+分数产物交给 JUBAIL 评估。正式评测将文本漏召回计为失败，并比较 Text-only、
+Text+Geometry、Text+PointNet 与 Text+Fusion。
+
+```bash
+python -m dev.text_retriever.precompute_rlbench_text_scores \
+  --manifest /path/to/manifest-val.jsonl \
+  --output /path/to/text_scores_v1.npz
+
+sbatch src/scripts/hpc/evaluate_end_to_end_retriever.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/evaluation/retriever_e2e_v1.json
+```
