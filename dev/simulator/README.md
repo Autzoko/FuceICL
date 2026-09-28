@@ -5,6 +5,11 @@
 Panda 单臂的 `PickCube-v1`、`PushCube-v1`、`StackCube-v1`；双臂和移动机器人任务不进入
 初始实验。
 
+> 当前数据契约：旧 `replay_pick_cube_v1` 使用 env-state forcing，观测位移不是可执行 controller
+> command，只保留作 Retriever/几何表示研究。Predictor 与闭环必须使用
+> `pick_cube_executable_v1` 采集的真实 command，以及由它生成的
+> `pick_cube_controller_chunks_v1`。
+
 验证顺序：
 
 1. `audit_maniskill_archive.py` 直接读取 ZIP，核对 episode、控制器、成功率和 HDF5 shape；
@@ -116,3 +121,53 @@ sbatch src/scripts/hpc/collect_maniskill_executable_pickcube.slurm \
 
 通过基础审计后，仍须用 `audit_maniskill_action_fidelity.py` 抽查 raw controller action 直接 replay；
 达到 4/4 才允许从实际 controller actions 构造 Predictor labels。
+
+## 当前 executable-command 流程
+
+action-fidelity 门槛通过后，使用真实 `pd_ee_delta_pose` command 生成 H=6 chunks。每个 token
+反变换为执行时刻 EEF 中的物理 `[translation_m, axis_angle_rad, gripper_open]`，并在写入前正变换
+回 controller command，最大绝对误差必须不超过 `1e-5`：
+
+```bash
+sbatch src/scripts/hpc/preprocess_maniskill_chunks.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_executable_v1/PickCube-v1/motionplanning/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.h5 \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_executable_v1/PickCube-v1/motionplanning/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_controller_chunks_v1 \
+  dev/simulator/config/pick_cube_controller_chunks_v1.json
+
+sbatch src/scripts/hpc/audit_maniskill_chunks.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_controller_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_controller_chunks_v1_audit.json
+```
+
+审计通过后，按固定顺序运行 Demo-copy 离线基线、轻量 LJAT 和闭环。command translation/rotation
+统一按 controller 的 `0.1 m / 0.1 rad` 范围归一化；闭环执行完整 100 steps，并记录但不在注册
+环境的 50-step TimeLimit `truncated` 处提前停止：
+
+```bash
+sbatch src/scripts/hpc/evaluate_maniskill_demo_prior.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_controller_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_controller_demo_prior_v1.json
+
+sbatch src/scripts/hpc/train_maniskill_local_transport.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_controller_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_controller_ljat_v1 \
+  dev/simulator/config/maniskill_local_transport_v1.json
+```
+
+若逐步 H=1 重规划被近零首 token 困住，使用同一 Retriever 比较 H=1 与完整 H=6 chunk 执行；
+不得搜索 H=2--5：
+
+```bash
+sbatch src/scripts/hpc/evaluate_maniskill_closed_loop.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_controller_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_executable_v1/PickCube-v1/motionplanning/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_controller_ljat_v1/local_jacobian_transport.pt \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_copy_horizon_v1.json \
+  dev/simulator/config/pick_cube_copy_horizon_v1.json
+```
