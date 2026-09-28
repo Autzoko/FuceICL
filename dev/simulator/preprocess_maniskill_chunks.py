@@ -22,7 +22,7 @@ from dev.predictor.canonical_geometry import FEATURE_NAMES, GEOMETRY_DIM
 
 @dataclass(frozen=True)
 class ManiSkillChunkConfig:
-    """PickCube pilot 的固定预处理协议。"""
+    """单活动物体 ManiSkill 任务的固定预处理协议。"""
 
     schema_version: str
     seed: int
@@ -37,6 +37,8 @@ class ManiSkillChunkConfig:
     action_representation: str = "cumulative_observation_delta"
     position_limit_m: float = 0.1
     rotation_scale_rad: float = -0.1
+    task_id: str = "PickCube-v1"
+    active_actor_name: str = "cube"
 
     @classmethod
     def from_json(cls, path: Path) -> "ManiSkillChunkConfig":
@@ -69,6 +71,8 @@ class ManiSkillChunkConfig:
             raise ValueError("controller command chunks 当前只支持 frame_stride=1")
         if self.position_limit_m <= 0 or self.rotation_scale_rad == 0:
             raise ValueError("controller position/rotation scale 非法")
+        if not self.task_id.strip() or not self.active_actor_name.strip():
+            raise ValueError("task_id 与 active_actor_name 不能为空")
 
 
 def _sha256(path: Path) -> str:
@@ -152,13 +156,13 @@ def _infer_active_label(
     *,
     xyzw: h5py.Dataset,
     segmentation: h5py.Dataset,
-    cube_positions: np.ndarray,
+    active_positions: np.ndarray,
     config: ManiSkillChunkConfig,
 ) -> tuple[int, dict[str, Any]]:
-    """用少量离线 actor supervision 自动匹配 cube segmentation label。"""
+    """用少量离线 actor supervision 自动匹配活动物体 segmentation label。"""
     votes: Counter[int] = Counter()
     distances: dict[int, list[float]] = {}
-    probe_count = min(config.label_probe_frames, len(cube_positions))
+    probe_count = min(config.label_probe_frames, len(active_positions))
     for frame in range(probe_count):
         candidates = _label_centroids(
             np.asarray(xyzw[frame]),
@@ -170,10 +174,10 @@ def _infer_active_label(
         label, (centroid, _) = min(
             candidates.items(),
             key=lambda item: float(
-                np.linalg.norm(item[1][0] - cube_positions[frame])
+                np.linalg.norm(item[1][0] - active_positions[frame])
             ),
         )
-        distance = float(np.linalg.norm(centroid - cube_positions[frame]))
+        distance = float(np.linalg.norm(centroid - active_positions[frame]))
         votes[label] += 1
         distances.setdefault(label, []).append(distance)
     label = min(
@@ -183,7 +187,8 @@ def _infer_active_label(
     probe_errors = distances[label]
     if max(probe_errors) > config.maximum_centroid_error_m:
         raise ValueError(
-            f"cube label={label} probe centroid error={max(probe_errors):.4f} m 超限"
+            f"active label={label} probe centroid error="
+            f"{max(probe_errors):.4f} m 超限"
         )
     return label, {
         "votes": {str(key): value for key, value in sorted(votes.items())},
@@ -393,6 +398,11 @@ def run(
     temporary.mkdir(parents=True)
     temporary.joinpath("shards").mkdir()
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    source_task = str(metadata.get("env_info", {}).get("env_id", ""))
+    if source_task and source_task != config.task_id:
+        raise ValueError(
+            f"source env_id={source_task} 与 config task_id={config.task_id} 不一致"
+        )
     summary: dict[str, Any] = {
         "schema_version": config.schema_version,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -418,7 +428,8 @@ def run(
             "pointcloud": "active-object points centered by observed centroid",
         },
         "privileged_supervision": (
-            "cube actor position is used only to identify a segmentation label; "
+            f"{config.active_actor_name} actor position is used only to identify "
+            "a segmentation label; "
             "stored geometry uses the observed point centroid"
         ),
         "splits": {},
@@ -447,15 +458,18 @@ def run(
                 goal_positions = np.asarray(trajectory["obs/extra/goal_pos"])
                 qpos = np.asarray(trajectory["obs/agent/qpos"])
                 controller_actions = np.asarray(trajectory["actions"])
-                cube_positions = np.asarray(
-                    trajectory["env_states/actors/cube"][:, :3]
+                actor_path = f"env_states/actors/{config.active_actor_name}"
+                if actor_path not in trajectory:
+                    raise KeyError(f"{key} 缺少 active actor path：{actor_path}")
+                active_positions = np.asarray(
+                    trajectory[actor_path][:, :3]
                 )
                 if len(controller_actions) != len(tcp_poses) - 1:
                     raise ValueError(f"{key} controller action/observation 长度不一致")
                 label, label_diagnostic = _infer_active_label(
                     xyzw=xyzw,
                     segmentation=segmentation,
-                    cube_positions=cube_positions,
+                    active_positions=active_positions,
                     config=config,
                 )
                 split = split_by_episode[key]
@@ -478,14 +492,16 @@ def run(
                         continue
                     center = points.mean(axis=0)
                     centroid_error = float(
-                        np.linalg.norm(center - cube_positions[frame])
+                        np.linalg.norm(center - active_positions[frame])
                     )
                     if centroid_error > config.maximum_centroid_error_m:
                         raise ValueError(
-                            f"{key} frame={frame} cube centroid error="
+                            f"{key} frame={frame} active centroid error="
                             f"{centroid_error:.4f} m 超限"
                         )
-                    identifier = f"maniskill:PickCube-v1:{key}:f{frame:03d}"
+                    identifier = (
+                        f"maniskill:{config.task_id}:{key}:f{frame:03d}"
+                    )
                     seed = int.from_bytes(
                         hashlib.sha256(identifier.encode()).digest()[:8], "little"
                     )
@@ -526,7 +542,7 @@ def run(
                         {
                             "chunk_id": identifier,
                             "split": split,
-                            "task": "PickCube-v1",
+                            "task": config.task_id,
                             "episode": int(key.split("_")[1]),
                             "frame": frame,
                             "active_label": label,
