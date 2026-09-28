@@ -21,7 +21,7 @@ readonly OUTPUT_ROOT="${6:?new output root is required}"
 readonly CONFIG_PATH="${7:?config path is required}"
 readonly FOLD_NAME="${8:?fold name is required}"
 shift 8
-readonly ENV_NAME="FuseICL"
+readonly ENV_NAME="FuseICL-pointnet"
 
 if [[ "$#" -lt 1 ]]; then
     echo "至少需要一个 held-out task" >&2
