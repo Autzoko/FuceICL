@@ -62,3 +62,17 @@ sbatch src/scripts/hpc/train_jacobian_transport.slurm \
   /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
   /scratch/ll5582/data/RLBench/training/jacobian_transport_pilot_v1
 ```
+
+固定 checkpoint 后，以 `task + variation + episode` 为 block 做 paired bootstrap，避免把同一
+episode 的多个 chunks 当作独立样本：
+
+```bash
+sbatch src/scripts/hpc/evaluate_jacobian_significance.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/processed/action_chunk_pilot_v1 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/training/jacobian_transport_pilot_v1/local_jacobian_transport.pt \
+  /scratch/ll5582/data/RLBench/evaluation/jacobian_significance_v1.json
+```
