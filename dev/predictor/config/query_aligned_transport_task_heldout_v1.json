@@ -1,0 +1,22 @@
+{
+  "schema_version": "rlbench-query-aligned-transport-task-heldout-v1",
+  "seed": 20260928,
+  "epochs": 60,
+  "batch_size": 128,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "gradient_clip_norm": 1.0,
+  "rank": 4,
+  "hidden_dim": 96,
+  "num_layers": 2,
+  "num_heads": 4,
+  "feedforward_dim": 192,
+  "dropout": 0.1,
+  "residual_limit": 2.0,
+  "retriever_batch_size": 64,
+  "retriever_num_workers": 4,
+  "text_group_budget": 10,
+  "text_score_weight": 0.15,
+  "bootstrap_resamples": 10000,
+  "latency_iterations": 200
+}
