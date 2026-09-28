@@ -18,6 +18,7 @@ import h5py
 import mani_skill
 import numpy as np
 import sapien
+from mani_skill.trajectory import utils as trajectory_utils
 
 from dev.predictor.action_chunk_data import matrix_to_axis_angle
 from dev.simulator.evaluate_maniskill_closed_loop import (
@@ -351,6 +352,9 @@ def run(
                 raw_actions = np.asarray(group["actions"], dtype=np.float32)
                 logged_tcp = np.asarray(group["obs/extra/tcp_pose"], dtype=np.float64)
                 logged_qpos = np.asarray(group["obs/agent/qpos"], dtype=np.float64)
+                initial_env_state = trajectory_utils.index_dict(
+                    group["env_states"], 0
+                )
                 if raw_actions.ndim != 2 or raw_actions.shape[1] != 7:
                     raise ValueError(f"episode {episode_id} action shape 非法")
                 if not np.isfinite(raw_actions).all():
@@ -370,7 +374,9 @@ def run(
                 episode = episodes[episode_id]
                 seed = int(episode["episode_seed"])
                 for policy in config.policies:
-                    observation, reset_info = environment.reset(seed=seed)
+                    environment.reset(seed=seed)
+                    environment.unwrapped.set_state_dict(initial_env_state)
+                    observation = environment.unwrapped.get_obs()
                     initial_pose = _tcp_pose(observation)
                     initial_difference = float(
                         np.max(np.abs(initial_pose - logged_tcp[0]))
@@ -383,7 +389,8 @@ def run(
                             f"episode {episode_id} 初始 TCP 与 replay 差异 "
                             f"{initial_difference:.4g}"
                         )
-                    success = _scalar_bool(reset_info.get("success", False))
+                    initial_info = environment.unwrapped.evaluate()
+                    success = _scalar_bool(initial_info.get("success", False))
                     success_step = 0 if success else None
                     records = []
                     for step in range(len(raw_actions)):
@@ -460,6 +467,7 @@ def run(
             "observed_delta": "execute adjacent logged TCP pose delta",
             "tracking": "track next logged TCP pose from current online pose",
             "selection": "first four successful source episodes; fixed before execution",
+            "initialization": "seed reset followed by exact HDF5 env_states[0]",
         },
         "config": asdict(config),
         "git_commit": _git_commit(project_root),
