@@ -501,6 +501,7 @@ def run(
                                 "step": step + 1,
                                 "reward": float(_to_numpy(reward).reshape(-1)[0]),
                                 "success": step_success,
+                                "truncated": _scalar_bool(truncated),
                                 "tcp_translation_error_m": translation_error,
                                 "tcp_rotation_error_rad": rotation_error,
                                 "controller_action": action.tolist(),
@@ -511,7 +512,9 @@ def run(
                             success = True
                             success_step = step + 1
                             break
-                        if _scalar_bool(terminated) or _scalar_bool(truncated):
+                        # 官方 motion-planning Demo 可长于 Gym TimeLimit；
+                        # fidelity 审计必须执行完整保存序列，不能在 truncated 处截断。
+                        if _scalar_bool(terminated):
                             break
                     row = {
                         "episode_id": episode_id,
@@ -551,6 +554,7 @@ def run(
             "observed_delta": "execute adjacent logged TCP pose delta",
             "tracking": "track next logged TCP pose from current online pose",
             "selection": "first four successful source episodes; fixed before execution",
+            "horizon": "execute the complete saved action sequence; ignore TimeLimit truncation",
             "initialization": (
                 "seed reset followed by original source HDF5 env_states[0]; "
                 "converted HDF5 supplies observation-derived deltas only"
