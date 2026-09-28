@@ -1,0 +1,18 @@
+{
+  "schema_version": "maniskill-radm-external-confirmation-v1",
+  "seed": 20261003,
+  "source_checkpoint_sha256": "015d57a36f57f65ae310376badd3781621efa402d90f9b378b1cd75375e2b143",
+  "radm_checkpoint_sha256": "033614d61b1a64e27e5b6851cc338bea0a62204d0ea17f2f56724b45e418082f",
+  "candidate_count": 4,
+  "bootstrap_resamples": 10000,
+  "query_summary_sha256": {
+    "PickCube-v1": "446d6161f7f232838ea4b0dcb7cc73d060c0c7a306997af269627a796437c432",
+    "PushCube-v1": "ba12656691ad73e0d8db10b779c04948bf3490e15522cfda588d29e2d5de60ee",
+    "PullCube-v1": "7e7ceefe2a938b01991bc75d177fb8c90f138df9e5c2c7bb8fba49e9d7036ae9"
+  },
+  "query_audit_sha256": {
+    "PickCube-v1": "249424940d2e6fc0e570793e3dde80a20d61fddfaf3219332923a15f17e5e1f7",
+    "PushCube-v1": "e0dcd018c56eb6a38012e0298cf328bc2faa63e3f6e86ee326c753812d081837",
+    "PullCube-v1": "d3dc3e6ecff68c94570007b74354bfc9d73b46e2591197ca762be069bde6f71a"
+  }
+}
