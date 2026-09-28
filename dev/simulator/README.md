@@ -88,3 +88,15 @@ sbatch src/scripts/hpc/evaluate_maniskill_closed_loop.slurm \
   /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_ljat_v1/local_jacobian_transport.pt \
   /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_closed_loop_v1.json
 ```
+
+若 Demo 策略无法超过 zero，先固定审计 controller fidelity，不调 Retriever 或 Predictor。该审计
+在前四个成功 source episodes 上比较原始 controller action、相邻观测 TCP delta（分别使用 raw
+与 state-derived gripper）以及在线 pose tracking：
+
+```bash
+sbatch src/scripts/hpc/audit_maniskill_action_fidelity.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.h5 \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_action_fidelity_v1.json
+```

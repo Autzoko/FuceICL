@@ -1,0 +1,12 @@
+{
+  "schema_version": "maniskill-pick-cube-action-fidelity-v1",
+  "episode_ids": [0, 1, 2, 3],
+  "policies": [
+    "raw_controller_action",
+    "observed_delta_raw_gripper",
+    "observed_delta_state_gripper",
+    "online_pose_tracking_raw_gripper"
+  ],
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1
+}
