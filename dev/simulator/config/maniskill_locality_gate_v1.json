@@ -1,0 +1,6 @@
+{
+  "schema_version": "maniskill-locality-gate-v1",
+  "seed": 20260928,
+  "train_distance_quantile": 0.95,
+  "bootstrap_resamples": 5000
+}
