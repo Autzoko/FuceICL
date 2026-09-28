@@ -150,6 +150,17 @@ def _ratio(numerator: np.ndarray, denominator: np.ndarray) -> list[float]:
     ).tolist()
 
 
+def _preprocess_raw_controller_actions(actions: np.ndarray) -> np.ndarray:
+    """复现 ManiSkill normalized controller 对 source action 的裁剪。"""
+    processed = np.asarray(actions, dtype=np.float64).copy()
+    processed[:, :3] = np.clip(processed[:, :3], -1.0, 1.0)
+    rotation_norm = np.linalg.norm(processed[:, 3:6], axis=1)
+    clipped = rotation_norm > 1.0
+    processed[clipped, 3:6] /= rotation_norm[clipped, None]
+    processed[:, 6] = np.clip(processed[:, 6], -1.0, 1.0)
+    return processed
+
+
 def _stats(values: Sequence[float]) -> dict[str, float | int] | None:
     if not values:
         return None
@@ -190,10 +201,21 @@ def _offline_command_audit(
         state_gripper.append(_gripper_open(qpos[step + 1]) >= 0.5)
         raw_gripper.append(gripper)
     observed = np.asarray(reconstructed, dtype=np.float64)
-    controller = np.asarray(raw, dtype=np.float64)
+    raw_controller = np.asarray(raw, dtype=np.float64)
+    controller = _preprocess_raw_controller_actions(raw_controller)
     return {
         "steps": limit,
-        "controller_mae": np.abs(observed - controller).mean(axis=0).tolist(),
+        "raw_action_min": raw_controller.min(axis=0).tolist(),
+        "raw_action_max": raw_controller.max(axis=0).tolist(),
+        "raw_translation_clip_rate": float(
+            np.mean(np.any(np.abs(raw_controller[:, :3]) > 1.0, axis=1))
+        ),
+        "raw_rotation_clip_rate": float(
+            np.mean(np.linalg.norm(raw_controller[:, 3:6], axis=1) > 1.0)
+        ),
+        "preprocessed_controller_mae": (
+            np.abs(observed - controller).mean(axis=0).tolist()
+        ),
         "translation_norm_ratio": _stats(
             _ratio(observed[:, :3], controller[:, :3])
         ),
@@ -218,8 +240,8 @@ def _policy_action(
     raw = np.asarray(raw_actions[step], dtype=np.float32)
     if policy == "raw_controller_action":
         return raw, {
-            "translation_clipped": False,
-            "rotation_clipped": False,
+            "translation_clipped": bool(np.any(np.abs(raw[:3]) > 1.0)),
+            "rotation_clipped": bool(np.linalg.norm(raw[3:6]) > 1.0),
             "canonical_action": None,
         }
     target_index = min(step + 1, len(logged_tcp_poses) - 1)
@@ -331,10 +353,7 @@ def run(
                 logged_qpos = np.asarray(group["obs/agent/qpos"], dtype=np.float64)
                 if raw_actions.ndim != 2 or raw_actions.shape[1] != 7:
                     raise ValueError(f"episode {episode_id} action shape 非法")
-                if (
-                    not np.isfinite(raw_actions).all()
-                    or np.max(np.abs(raw_actions)) > 1.0001
-                ):
+                if not np.isfinite(raw_actions).all():
                     raise ValueError(f"episode {episode_id} controller action 非法")
                 if len(logged_tcp) != len(logged_qpos):
                     raise ValueError(f"episode {episode_id} TCP/qpos 长度不一致")
