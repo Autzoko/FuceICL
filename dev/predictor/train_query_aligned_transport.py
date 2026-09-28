@@ -291,6 +291,7 @@ def _primary_selection_indices(
     action_masks: torch.Tensor,
     retrieval_scores: torch.Tensor,
     text_mask: torch.Tensor,
+    candidate_tasks: set[str] | None = None,
 ) -> tuple[list[int], dict[str, list[tuple[int, int]]]]:
     """选择主指标 query，不依赖 hard-negative 完整性。"""
     id_to_index = {
@@ -299,6 +300,14 @@ def _primary_selection_indices(
     }
     pairs = {str(row["query_id"]): row for row in pair_rows}
     full = action_masks.all(dim=1)
+    allowed_candidates = torch.tensor(
+        [
+            candidate_tasks is None
+            or str(record["task"]) in candidate_tasks
+            for record in records
+        ],
+        dtype=torch.bool,
+    )
     eligible: list[int] = []
     selections = {"oracle": [], "retrieved": []}
     for query_index, record in enumerate(records):
@@ -319,6 +328,7 @@ def _primary_selection_indices(
             _base_candidate_mask(records, query_index)
             & text_mask[query_index]
             & full
+            & allowed_candidates
         )
         ranked = torch.argsort(
             retrieval_scores[query_index].masked_fill(

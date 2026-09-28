@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import torch
 
+from dev.predictor.benefit_calibrated_shrinkage import (
+    BenefitCalibratedGate,
+    apply_shrinkage,
+    frozen_transport_features,
+    optimal_shrinkage_target,
+)
 from dev.predictor.query_aligned_transport import (
     QueryAlignedLowRankDemoTransport,
 )
@@ -39,6 +45,16 @@ def test_identity_no_demo_and_discrete_prior() -> None:
 
     no_demo = model(query, demo, actions, torch.zeros_like(mask))
     assert torch.equal(no_demo, torch.zeros_like(actions))
+
+    diagnostic_prediction, delta, attention = model.forward_with_diagnostics(
+        query,
+        demo,
+        actions,
+        mask,
+    )
+    assert torch.equal(diagnostic_prediction, prediction)
+    assert delta.shape == (4, 17)
+    assert attention.shape == (4, 4, 6, 6)
 
 
 def test_rank_attention_and_parameter_budget() -> None:
@@ -89,3 +105,76 @@ def test_primary_selection_does_not_require_hard_negatives() -> None:
         "oracle": [(1, 1)],
         "retrieved": [(1, 1)],
     }
+
+    restricted_indices, restricted = _primary_selection_indices(
+        records=[
+            *records,
+            {"chunk_id": "held", "task": "held", "episode": 2},
+        ],
+        pair_rows=pair_rows,
+        action_masks=torch.ones(3, 6, dtype=torch.bool),
+        retrieval_scores=torch.tensor(
+            [
+                [0.0, 0.8, 0.99],
+                [0.8, 0.0, 0.0],
+                [0.99, 0.0, 0.0],
+            ]
+        ),
+        text_mask=torch.ones(3, 3, dtype=torch.bool),
+        candidate_tasks={"task"},
+    )
+    assert restricted_indices == [0]
+    assert restricted["retrieved"] == [(1, 1)]
+
+
+def test_benefit_gate_features_and_projection_invariants() -> None:
+    transport = QueryAlignedLowRankDemoTransport().eval()
+    query, demo, actions, mask = _inputs()
+    transported, features = frozen_transport_features(
+        transport,
+        query,
+        demo,
+        actions,
+        mask,
+    )
+    gate_model = BenefitCalibratedGate().eval()
+    gate = gate_model(features)
+    prediction = apply_shrinkage(actions, transported, gate, mask)
+
+    assert features.shape == (4, 40)
+    assert bool(((gate >= 0.0) & (gate <= 1.0)).all())
+    assert torch.equal(prediction[..., 3:], actions[..., 3:])
+    assert torch.equal(
+        apply_shrinkage(actions, transported, torch.zeros(4), mask),
+        actions,
+    )
+    assert torch.equal(
+        apply_shrinkage(actions, transported, torch.ones(4), mask),
+        transported,
+    )
+    optimal, energy = optimal_shrinkage_target(
+        actions,
+        transported,
+        transported,
+        mask,
+    )
+    active = energy > 1e-8
+    assert torch.allclose(optimal[active], torch.ones_like(optimal)[active])
+    assert sum(parameter.numel() for parameter in gate_model.parameters()) < 5_000
+
+    target = torch.randn_like(actions)
+    oracle_gate, _ = optimal_shrinkage_target(
+        actions,
+        transported,
+        target,
+        mask,
+    )
+    oracle = apply_shrinkage(actions, transported, oracle_gate, mask)
+
+    def translation_loss(value: torch.Tensor) -> torch.Tensor:
+        error = (value[..., :3] - target[..., :3]).square()
+        return (error * mask[..., None]).sum(dim=(1, 2))
+
+    oracle_loss = translation_loss(oracle)
+    assert bool((oracle_loss <= translation_loss(actions) + 1e-6).all())
+    assert bool((oracle_loss <= translation_loss(transported) + 1e-6).all())

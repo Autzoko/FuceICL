@@ -1,0 +1,16 @@
+{
+  "schema_version": "rlbench-benefit-calibrated-shrinkage-v1",
+  "seed": 20260928,
+  "epochs": 100,
+  "batch_size": 128,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "gradient_clip_norm": 1.0,
+  "hidden_dim": 32,
+  "retriever_batch_size": 64,
+  "retriever_num_workers": 4,
+  "text_group_budget": 10,
+  "text_score_weight": 0.15,
+  "bootstrap_resamples": 10000,
+  "latency_iterations": 200
+}

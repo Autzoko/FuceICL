@@ -206,9 +206,25 @@ class QueryAlignedLowRankDemoTransport(nn.Module):
         demo_actions: torch.Tensor,
         demo_mask: torch.Tensor,
     ) -> torch.Tensor:
+        prediction, _, _ = self.forward_with_diagnostics(
+            query_geometry,
+            demo_geometry,
+            demo_actions,
+            demo_mask,
+        )
+        return prediction
+
+    def forward_with_diagnostics(
+        self,
+        query_geometry: torch.Tensor,
+        demo_geometry: torch.Tensor,
+        demo_actions: torch.Tensor,
+        demo_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """单次前向同时返回 prediction、normalized delta 与 attention。"""
         valid = demo_mask.bool()
         mask = valid.float().unsqueeze(-1)
-        left, right, delta, _ = self.transport_factors(
+        left, right, delta, attention = self.transport_factors(
             query_geometry,
             demo_geometry,
             demo_actions,
@@ -221,4 +237,5 @@ class QueryAlignedLowRankDemoTransport(nn.Module):
         )
         residual = torch.zeros_like(demo_actions)
         residual[..., : self.config.transported_action_dim] = continuous
-        return (demo_actions + residual) * mask
+        prediction = (demo_actions + residual) * mask
+        return prediction, delta, attention
