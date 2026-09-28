@@ -75,3 +75,16 @@ sbatch src/scripts/hpc/train_maniskill_local_transport.slurm \
   /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1 \
   /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_ljat_v1
 ```
+
+LJAT 固定后，在与 replay 数据不重叠的新环境 seeds 上做 receding-horizon 闭环。脚本先验证
+canonical EEF action 到 ManiSkill controller 的 frame/sign round-trip，再比较 zero、Demo copy、
+完整 LJAT 和 factorized transport：
+
+```bash
+sbatch src/scripts/hpc/evaluate_maniskill_closed_loop.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_ljat_v1/local_jacobian_transport.pt \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_closed_loop_v1.json
+```
