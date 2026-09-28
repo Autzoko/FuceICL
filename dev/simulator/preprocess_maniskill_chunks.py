@@ -41,6 +41,7 @@ class ManiSkillChunkConfig:
     active_actor_name: str = "cube"
     target_position_source: str = "observation_goal_pos"
     target_actor_name: str | None = None
+    store_geometry_sequence: bool = False
 
     @classmethod
     def from_json(cls, path: Path) -> "ManiSkillChunkConfig":
@@ -266,6 +267,61 @@ def _canonical_geometry(
     return geometry
 
 
+def _observed_frame_geometry(
+    *,
+    xyzw: np.ndarray,
+    segmentation: np.ndarray,
+    active_label: int,
+    active_position: np.ndarray,
+    target_label: int | None,
+    target_position: np.ndarray,
+    tcp_poses: np.ndarray,
+    qpos: np.ndarray,
+    frame: int,
+    config: ManiSkillChunkConfig,
+) -> tuple[np.ndarray, np.ndarray, float, int | None, float | None] | None:
+    """从单帧观测构造 geometry；仿真位姿仅用于离线分割质心审计。"""
+    active_points = _segmented_points(xyzw, segmentation, active_label)
+    if len(active_points) < config.minimum_label_points:
+        return None
+    active_center = active_points.mean(axis=0)
+    active_error = float(np.linalg.norm(active_center - active_position))
+    if active_error > config.maximum_centroid_error_m:
+        raise ValueError(
+            f"frame={frame} active centroid error={active_error:.4f} m 超限"
+        )
+
+    target_point_count: int | None = None
+    target_error: float | None = None
+    goal_position = target_position
+    if target_label is not None:
+        target_points = _segmented_points(xyzw, segmentation, target_label)
+        target_point_count = len(target_points)
+        if target_point_count < config.minimum_label_points:
+            return None
+        goal_position = target_points.mean(axis=0)
+        target_error = float(np.linalg.norm(goal_position - target_position))
+        if target_error > config.maximum_centroid_error_m:
+            raise ValueError(
+                f"frame={frame} target centroid error={target_error:.4f} m 超限"
+            )
+    geometry = _canonical_geometry(
+        active_points=active_points,
+        active_center=active_center,
+        goal_position=goal_position,
+        tcp_poses=tcp_poses,
+        qpos=qpos,
+        frame=frame,
+    )
+    return (
+        active_points,
+        geometry,
+        active_error,
+        target_point_count,
+        target_error,
+    )
+
+
 def _canonical_action_chunk(
     *,
     tcp_poses: np.ndarray,
@@ -439,6 +495,11 @@ def run(
                 else "cumulative query-EEF [translation, axis-angle, gripper_open]"
             ),
             "pointcloud": "active-object points centered by observed centroid",
+            "geometry_sequence": (
+                "Demo-only H+1 observed canonical geometries"
+                if config.store_geometry_sequence
+                else "not stored"
+            ),
         },
         "privileged_supervision": {
             "active": (
@@ -533,54 +594,31 @@ def run(
                     config.horizon * config.frame_stride
                 )
                 for frame in range(max_query_frame + 1):
-                    points = _segmented_points(
-                        np.asarray(xyzw[frame]),
-                        np.asarray(segmentation[frame]),
-                        active_label,
+                    observed = _observed_frame_geometry(
+                        xyzw=np.asarray(xyzw[frame]),
+                        segmentation=np.asarray(segmentation[frame]),
+                        active_label=active_label,
+                        active_position=active_positions[frame],
+                        target_label=target_label,
+                        target_position=target_positions[frame],
+                        tcp_poses=tcp_poses,
+                        qpos=qpos,
+                        frame=frame,
+                        config=config,
                     )
-                    if len(points) < config.minimum_label_points:
+                    if observed is None:
                         skipped_low_visibility.append(
-                            {"frame": frame, "visible_points": len(points)}
+                            {"frame": frame, "role": "query_or_target"}
                         )
                         continue
-                    target_point_count: int | None = None
-                    target_centroid_error: float | None = None
-                    if target_label is None:
-                        goal_position = target_positions[frame]
-                    else:
-                        target_points = _segmented_points(
-                            np.asarray(xyzw[frame]),
-                            np.asarray(segmentation[frame]),
-                            target_label,
-                        )
-                        target_point_count = len(target_points)
-                        if target_point_count < config.minimum_label_points:
-                            skipped_low_visibility.append(
-                                {
-                                    "frame": frame,
-                                    "role": "target",
-                                    "visible_points": target_point_count,
-                                }
-                            )
-                            continue
-                        goal_position = target_points.mean(axis=0)
-                        target_centroid_error = float(
-                            np.linalg.norm(goal_position - target_positions[frame])
-                        )
-                        if target_centroid_error > config.maximum_centroid_error_m:
-                            raise ValueError(
-                                f"{key} frame={frame} target centroid error="
-                                f"{target_centroid_error:.4f} m 超限"
-                            )
+                    (
+                        points,
+                        geometry,
+                        centroid_error,
+                        target_point_count,
+                        target_centroid_error,
+                    ) = observed
                     center = points.mean(axis=0)
-                    centroid_error = float(
-                        np.linalg.norm(center - active_positions[frame])
-                    )
-                    if centroid_error > config.maximum_centroid_error_m:
-                        raise ValueError(
-                            f"{key} frame={frame} active centroid error="
-                            f"{centroid_error:.4f} m 超限"
-                        )
                     identifier = (
                         f"maniskill:{config.task_id}:{key}:f{frame:03d}"
                     )
@@ -592,14 +630,6 @@ def run(
                         center,
                         count=config.points_per_object,
                         seed=seed,
-                    )
-                    geometry = _canonical_geometry(
-                        active_points=points,
-                        active_center=center,
-                        goal_position=goal_position,
-                        tcp_poses=tcp_poses,
-                        qpos=qpos,
-                        frame=frame,
                     )
                     if (
                         config.action_representation
@@ -620,6 +650,49 @@ def run(
                             frame=frame,
                             config=config,
                         )
+
+                    geometry_sequence: np.ndarray | None = None
+                    if config.store_geometry_sequence:
+                        sequence = [geometry]
+                        sequence_visible = True
+                        for sequence_frame in target_frames.tolist():
+                            future = _observed_frame_geometry(
+                                xyzw=np.asarray(xyzw[sequence_frame]),
+                                segmentation=np.asarray(
+                                    segmentation[sequence_frame]
+                                ),
+                                active_label=active_label,
+                                active_position=active_positions[sequence_frame],
+                                target_label=target_label,
+                                target_position=target_positions[sequence_frame],
+                                tcp_poses=tcp_poses,
+                                qpos=qpos,
+                                frame=sequence_frame,
+                                config=config,
+                            )
+                            if future is None:
+                                skipped_low_visibility.append(
+                                    {
+                                        "frame": frame,
+                                        "role": "geometry_sequence",
+                                        "missing_frame": sequence_frame,
+                                    }
+                                )
+                                sequence_visible = False
+                                break
+                            sequence.append(future[1])
+                        if not sequence_visible:
+                            continue
+                        geometry_sequence = np.stack(sequence).astype(np.float32)
+
+                    arrays = {
+                        "active_points": sampled,
+                        "geometry": geometry,
+                        "actions": actions,
+                        "target_frames": target_frames,
+                    }
+                    if geometry_sequence is not None:
+                        arrays["geometry_sequence"] = geometry_sequence
                     writers[split].add(
                         {
                             "chunk_id": identifier,
@@ -634,12 +707,7 @@ def run(
                             "target_point_count": target_point_count,
                             "target_centroid_error_m": target_centroid_error,
                         },
-                        {
-                            "active_points": sampled,
-                            "geometry": geometry,
-                            "actions": actions,
-                            "target_frames": target_frames,
-                        },
+                        arrays,
                     )
                     frame_errors.append(centroid_error)
                     frame_point_counts.append(len(points))

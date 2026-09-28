@@ -1,0 +1,19 @@
+{
+  "schema_version": "maniskill-pick-cube-demo-context-v2",
+  "seed": 20260928,
+  "horizon": 6,
+  "frame_stride": 1,
+  "points_per_object": 128,
+  "label_probe_frames": 5,
+  "minimum_label_points": 8,
+  "maximum_centroid_error_m": 0.08,
+  "validation_episodes": 8,
+  "shard_size": 256,
+  "action_representation": "canonical_controller_command",
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "task_id": "PickCube-v1",
+  "active_actor_name": "cube",
+  "target_position_source": "observation_goal_pos",
+  "store_geometry_sequence": true
+}

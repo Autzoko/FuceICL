@@ -16,7 +16,7 @@ import numpy as np
 from dev.predictor.canonical_geometry import GEOMETRY_DIM
 
 
-EXPECTED_ARRAYS = {"active_points", "geometry", "actions", "target_frames"}
+BASE_ARRAYS = {"active_points", "geometry", "actions", "target_frames"}
 
 
 def _sha256(path: Path) -> str:
@@ -56,6 +56,9 @@ def run(root: Path, output_path: Path) -> None:
     )
     position_limit_m = float(config.get("position_limit_m", 0.1))
     rotation_scale_rad = abs(float(config.get("rotation_scale_rad", -0.1)))
+    expected_arrays = set(BASE_ARRAYS)
+    if bool(config.get("store_geometry_sequence", False)):
+        expected_arrays.add("geometry_sequence")
 
     split_reports: dict[str, Any] = {}
     split_episodes: dict[str, set[int]] = {}
@@ -73,21 +76,21 @@ def run(root: Path, output_path: Path) -> None:
             grouped[str(record["shard"])].append(record)
 
         values: dict[str, list[np.ndarray]] = {
-            name: [] for name in EXPECTED_ARRAYS
+            name: [] for name in expected_arrays
         }
         covered_rows = 0
         for relative, shard_records in sorted(grouped.items()):
             shard_path = root / relative
             with np.load(shard_path) as archive:
-                if set(archive.files) != EXPECTED_ARRAYS:
+                if set(archive.files) != expected_arrays:
                     raise ValueError(
-                        f"{relative} arrays={archive.files}，预期={sorted(EXPECTED_ARRAYS)}"
+                        f"{relative} arrays={archive.files}，预期={sorted(expected_arrays)}"
                     )
                 row_count = len(archive["geometry"])
                 rows = [int(record["row"]) for record in shard_records]
                 if sorted(rows) != list(range(row_count)):
                     raise ValueError(f"{relative} manifest row 不连续或未完全覆盖")
-                for name in EXPECTED_ARRAYS:
+                for name in expected_arrays:
                     values[name].append(np.asarray(archive[name]))
                 covered_rows += row_count
         if covered_rows != len(records):
@@ -103,6 +106,12 @@ def run(root: Path, output_path: Path) -> None:
             "actions": (len(records), horizon, 7),
             "target_frames": (len(records), horizon),
         }
+        if "geometry_sequence" in expected_arrays:
+            expected_shapes["geometry_sequence"] = (
+                len(records),
+                horizon + 1,
+                GEOMETRY_DIM,
+            )
         for name, expected in expected_shapes.items():
             if arrays[name].shape != expected:
                 raise ValueError(
@@ -151,6 +160,14 @@ def run(root: Path, output_path: Path) -> None:
             raise ValueError(f"{split} geometry gripper 超出 [0,1]")
         if not np.all(target_valid == 1.0):
             raise ValueError(f"{split} target_valid 应全部为 1")
+        if "geometry_sequence" in arrays:
+            sequence = arrays["geometry_sequence"]
+            if not np.array_equal(sequence[:, 0], arrays["geometry"]):
+                raise ValueError(f"{split} geometry_sequence 首帧与 geometry 不一致")
+            if not np.all(sequence[..., 16] == 1.0):
+                raise ValueError(f"{split} geometry_sequence target_valid 非 1")
+            if sequence[..., 15].min() < 0.0 or sequence[..., 15].max() > 1.0:
+                raise ValueError(f"{split} geometry_sequence gripper 超出 [0,1]")
 
         translation = np.linalg.norm(arrays["actions"][..., :3], axis=-1)
         rotation = np.linalg.norm(arrays["actions"][..., 3:6], axis=-1)
@@ -200,7 +217,7 @@ def run(root: Path, output_path: Path) -> None:
         "root": str(root),
         "summary_sha256": _sha256(summary_path),
         "source_h5_sha256": summary["source"]["h5_sha256"],
-        "array_allowlist": sorted(EXPECTED_ARRAYS),
+        "array_allowlist": sorted(expected_arrays),
         "privileged_state_in_shards": False,
         "action_representation": action_representation,
         "episode_overlap": [],
