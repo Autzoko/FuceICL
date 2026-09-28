@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from mani_skill.examples.motionplanning.panda.run import (
     MP_SOLUTIONS,
     _main,
-    parse_args as parse_maniskill_args,
 )
 
 
@@ -28,22 +28,21 @@ def run(
         raise ValueError("trajectory 数量必须为正，start seed 不能为负")
     if output_root.exists():
         raise FileExistsError(f"输出目录已存在，拒绝覆盖：{output_root}")
-    arguments = parse_maniskill_args(
-        [
-            "--env-id",
-            env_id,
-            "--obs-mode",
-            "none",
-            "--num-traj",
-            str(num_trajectories),
-            "--only-count-success",
-            "--sim-backend",
-            sim_backend,
-            "--traj-name",
-            trajectory_name,
-            "--record-dir",
-            str(output_root),
-        ]
+    # 上游 parse_args 当前忽略其 args 参数，因此显式构造 _main 所需字段。
+    arguments = SimpleNamespace(
+        env_id=env_id,
+        obs_mode="none",
+        num_traj=num_trajectories,
+        only_count_success=True,
+        reward_mode=None,
+        sim_backend=sim_backend,
+        render_mode="rgb_array",
+        vis=False,
+        save_video=False,
+        traj_name=trajectory_name,
+        shader="default",
+        record_dir=str(output_root),
+        num_procs=1,
     )
     output = Path(_main(arguments, proc_id=0, start_seed=start_seed))
     print(
