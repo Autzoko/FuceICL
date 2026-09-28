@@ -1,0 +1,9 @@
+{
+  "schema_version": "maniskill-in-context-local-policy-v1",
+  "seed": 20260928,
+  "ridge_lambda": 0.1,
+  "position_scale_m": 0.1,
+  "correction_limit_normalized": 0.25,
+  "minimum_demo_radius_normalized": 0.05,
+  "bootstrap_resamples": 5000
+}
