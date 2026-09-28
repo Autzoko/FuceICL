@@ -164,6 +164,10 @@ def run(
 ) -> None:
     if output_path.exists():
         raise FileExistsError(f"输出已存在，拒绝覆盖：{output_path}")
+    data_summary = json.loads(
+        (data_root / "summary.json").read_text(encoding="utf-8")
+    )
+    task_id = str(data_summary.get("config", {}).get("task_id", "unknown"))
     (
         pose_scales,
         translation_threshold_m,
@@ -212,7 +216,7 @@ def run(
         )
         for name, prediction in predictions.items()
     }
-    group_ids = [f"PickCube-v1:{record['episode']}" for record in val_records]
+    group_ids = [f"{task_id}:{record['episode']}" for record in val_records]
     selected_distances = distances[
         torch.arange(len(val_records))[:, None], candidates
     ].numpy()
@@ -241,6 +245,7 @@ def run(
             "rotation_threshold_rad": rotation_threshold_rad,
         },
         "git_commit": _git_commit(project_root),
+        "task_id": task_id,
         "data_summary_sha256": _sha256(data_root / "summary.json"),
         "train_queries": len(train_records),
         "validation_queries": len(val_records),
