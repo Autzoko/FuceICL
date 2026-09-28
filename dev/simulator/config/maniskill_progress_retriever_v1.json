@@ -1,0 +1,6 @@
+{
+  "schema_version": "maniskill-progress-retriever-v1",
+  "seed": 20260928,
+  "progress_window_frames": 6,
+  "bootstrap_resamples": 5000
+}
