@@ -96,7 +96,8 @@ sbatch src/scripts/hpc/evaluate_maniskill_closed_loop.slurm \
 ```bash
 sbatch src/scripts/hpc/audit_maniskill_action_fidelity.slurm \
   "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.h5 \
   /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.h5 \
   /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
-  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_action_fidelity_v1.json
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_action_fidelity_source_aligned_v1.json
 ```

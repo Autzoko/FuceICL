@@ -306,7 +306,8 @@ def _summarize(rollouts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 def run(
     *,
     project_root: Path,
-    h5_path: Path,
+    source_h5_path: Path,
+    converted_h5_path: Path,
     metadata_path: Path,
     config_path: Path,
     output_path: Path,
@@ -347,44 +348,98 @@ def run(
             position_limit_m=config.position_limit_m,
             rotation_scale_rad=config.rotation_scale_rad,
         )
-        with h5py.File(h5_path, "r") as handle:
+        with (
+            h5py.File(source_h5_path, "r") as source_handle,
+            h5py.File(converted_h5_path, "r") as converted_handle,
+        ):
             for episode_id in config.episode_ids:
-                group = handle[f"traj_{episode_id}"]
-                raw_actions = np.asarray(group["actions"], dtype=np.float32)
-                logged_tcp = np.asarray(group["obs/extra/tcp_pose"], dtype=np.float64)
-                logged_qpos = np.asarray(group["obs/agent/qpos"], dtype=np.float64)
-                logged_qvel = np.asarray(group["obs/agent/qvel"], dtype=np.float64)
+                source = source_handle[f"traj_{episode_id}"]
+                converted = converted_handle[f"traj_{episode_id}"]
+                raw_actions = np.asarray(source["actions"], dtype=np.float32)
+                converted_actions = np.asarray(
+                    converted["actions"], dtype=np.float32
+                )
+                logged_tcp = np.asarray(
+                    converted["obs/extra/tcp_pose"], dtype=np.float64
+                )
+                logged_qpos = np.asarray(
+                    converted["obs/agent/qpos"], dtype=np.float64
+                )
+                logged_qvel = np.asarray(
+                    converted["obs/agent/qvel"], dtype=np.float64
+                )
                 initial_env_state = trajectory_utils.index_dict(
-                    group["env_states"], 0
+                    source["env_states"], 0
+                )
+                converted_initial_state = trajectory_utils.index_dict(
+                    converted["env_states"], 0
                 )
                 if raw_actions.ndim != 2 or raw_actions.shape[1] != 7:
                     raise ValueError(f"episode {episode_id} action shape 非法")
                 if not np.isfinite(raw_actions).all():
                     raise ValueError(f"episode {episode_id} controller action 非法")
+                if not np.array_equal(raw_actions, converted_actions):
+                    raise ValueError(f"episode {episode_id} source/converted action 不同")
                 if not (len(logged_tcp) == len(logged_qpos) == len(logged_qvel)):
                     raise ValueError(f"episode {episode_id} TCP/qpos/qvel 长度不一致")
                 if len(raw_actions) not in (len(logged_tcp), len(logged_tcp) - 1):
                     raise ValueError(f"episode {episode_id} action/obs 长度不一致")
-                panda_state = np.asarray(
+                source_panda_state = np.asarray(
                     initial_env_state["articulations"]["panda"],
                     dtype=np.float64,
-                ).copy()
-                dof = logged_qpos.shape[1]
-                if panda_state.shape != (13 + 2 * dof,):
-                    raise ValueError(f"episode {episode_id} Panda state shape 非法")
-                state_observation_qpos_difference = float(
-                    np.max(np.abs(panda_state[13 : 13 + dof] - logged_qpos[0]))
                 )
-                # 控制模式转换后的 observation 与 source articulation state 不同；
-                # actor state 保持 source 值，Panda 使用同帧可观测 qpos/qvel。
-                panda_state[13 : 13 + dof] = logged_qpos[0]
-                panda_state[13 + dof : 13 + 2 * dof] = logged_qvel[0]
-                initial_env_state["articulations"]["panda"] = panda_state
+                converted_panda_state = np.asarray(
+                    converted_initial_state["articulations"]["panda"],
+                    dtype=np.float64,
+                )
+                dof = logged_qpos.shape[1]
+                if (
+                    source_panda_state.shape != (13 + 2 * dof,)
+                    or converted_panda_state.shape != source_panda_state.shape
+                ):
+                    raise ValueError(f"episode {episode_id} Panda state shape 非法")
+                source_state_observation_qpos_difference = float(
+                    np.max(
+                        np.abs(
+                            source_panda_state[13 : 13 + dof]
+                            - logged_qpos[0]
+                        )
+                    )
+                )
+                converted_state_observation_qpos_difference = float(
+                    np.max(
+                        np.abs(
+                            converted_panda_state[13 : 13 + dof]
+                            - logged_qpos[0]
+                        )
+                    )
+                )
+                source_state_observation_qvel_difference = float(
+                    np.max(
+                        np.abs(
+                            source_panda_state[13 + dof : 13 + 2 * dof]
+                            - logged_qvel[0]
+                        )
+                    )
+                )
+                if max(
+                    source_state_observation_qpos_difference,
+                    source_state_observation_qvel_difference,
+                ) > 1e-6:
+                    raise ValueError(
+                        f"episode {episode_id} source state 与 converted obs 不对齐"
+                    )
                 offline_audits.append(
                     {
                         "episode_id": episode_id,
                         "source_state_observation_qpos_max_abs_difference": (
-                            state_observation_qpos_difference
+                            source_state_observation_qpos_difference
+                        ),
+                        "converted_state_observation_qpos_max_abs_difference": (
+                            converted_state_observation_qpos_difference
+                        ),
+                        "source_state_observation_qvel_max_abs_difference": (
+                            source_state_observation_qvel_difference
                         ),
                         **_offline_command_audit(
                             raw_actions, logged_tcp, logged_qpos, config
@@ -497,8 +552,8 @@ def run(
             "tracking": "track next logged TCP pose from current online pose",
             "selection": "first four successful source episodes; fixed before execution",
             "initialization": (
-                "seed reset; HDF5 actor state plus same-frame observable Panda "
-                "qpos/qvel from the converted trajectory"
+                "seed reset followed by original source HDF5 env_states[0]; "
+                "converted HDF5 supplies observation-derived deltas only"
             ),
         },
         "config": asdict(config),
@@ -510,7 +565,8 @@ def run(
             "numpy": np.__version__,
             "sapien": sapien.__version__,
         },
-        "h5_sha256": _sha256(h5_path),
+        "source_h5_sha256": _sha256(source_h5_path),
+        "converted_h5_sha256": _sha256(converted_h5_path),
         "metadata_sha256": _sha256(metadata_path),
         "config_sha256": _sha256(config_path),
         "runtime_controller": runtime_controller,
@@ -548,7 +604,8 @@ def run(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project-root", type=Path, required=True)
-    parser.add_argument("--h5", type=Path, required=True)
+    parser.add_argument("--source-h5", type=Path, required=True)
+    parser.add_argument("--converted-h5", type=Path, required=True)
     parser.add_argument("--metadata", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -559,7 +616,8 @@ def main() -> None:
     arguments = parse_args()
     run(
         project_root=arguments.project_root.resolve(),
-        h5_path=arguments.h5.resolve(),
+        source_h5_path=arguments.source_h5.resolve(),
+        converted_h5_path=arguments.converted_h5.resolve(),
         metadata_path=arguments.metadata.resolve(),
         config_path=arguments.config.resolve(),
         output_path=arguments.output.resolve(),
