@@ -13,5 +13,7 @@
   "position_limit_m": 0.1,
   "rotation_scale_rad": -0.1,
   "task_id": "PushCube-v1",
-  "active_actor_name": "cube"
+  "active_actor_name": "cube",
+  "target_position_source": "segmented_actor_centroid",
+  "target_actor_name": "goal_region"
 }

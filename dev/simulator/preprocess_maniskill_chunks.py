@@ -39,6 +39,8 @@ class ManiSkillChunkConfig:
     rotation_scale_rad: float = -0.1
     task_id: str = "PickCube-v1"
     active_actor_name: str = "cube"
+    target_position_source: str = "observation_goal_pos"
+    target_actor_name: str | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "ManiSkillChunkConfig":
@@ -73,6 +75,16 @@ class ManiSkillChunkConfig:
             raise ValueError("controller position/rotation scale 非法")
         if not self.task_id.strip() or not self.active_actor_name.strip():
             raise ValueError("task_id 与 active_actor_name 不能为空")
+        if self.target_position_source not in (
+            "observation_goal_pos",
+            "segmented_actor_centroid",
+        ):
+            raise ValueError("未知 target position source")
+        if (
+            self.target_position_source == "segmented_actor_centroid"
+            and not self.target_actor_name
+        ):
+            raise ValueError("segmented actor target 必须提供 target_actor_name")
 
 
 def _sha256(path: Path) -> str:
@@ -152,17 +164,18 @@ def _label_centroids(
     return result
 
 
-def _infer_active_label(
+def _infer_actor_label(
     *,
     xyzw: h5py.Dataset,
     segmentation: h5py.Dataset,
-    active_positions: np.ndarray,
+    actor_positions: np.ndarray,
     config: ManiSkillChunkConfig,
+    role: str,
 ) -> tuple[int, dict[str, Any]]:
-    """用少量离线 actor supervision 自动匹配活动物体 segmentation label。"""
+    """用少量离线 actor supervision 自动匹配观测中的 segmentation label。"""
     votes: Counter[int] = Counter()
     distances: dict[int, list[float]] = {}
-    probe_count = min(config.label_probe_frames, len(active_positions))
+    probe_count = min(config.label_probe_frames, len(actor_positions))
     for frame in range(probe_count):
         candidates = _label_centroids(
             np.asarray(xyzw[frame]),
@@ -174,10 +187,10 @@ def _infer_active_label(
         label, (centroid, _) = min(
             candidates.items(),
             key=lambda item: float(
-                np.linalg.norm(item[1][0] - active_positions[frame])
+                np.linalg.norm(item[1][0] - actor_positions[frame])
             ),
         )
-        distance = float(np.linalg.norm(centroid - active_positions[frame]))
+        distance = float(np.linalg.norm(centroid - actor_positions[frame]))
         votes[label] += 1
         distances.setdefault(label, []).append(distance)
     label = min(
@@ -187,7 +200,7 @@ def _infer_active_label(
     probe_errors = distances[label]
     if max(probe_errors) > config.maximum_centroid_error_m:
         raise ValueError(
-            f"active label={label} probe centroid error="
+            f"{role} label={label} probe centroid error="
             f"{max(probe_errors):.4f} m 超限"
         )
     return label, {
@@ -197,7 +210,7 @@ def _infer_active_label(
     }
 
 
-def _active_points(
+def _segmented_points(
     xyzw: np.ndarray,
     segmentation: np.ndarray,
     label: int,
@@ -427,11 +440,19 @@ def run(
             ),
             "pointcloud": "active-object points centered by observed centroid",
         },
-        "privileged_supervision": (
-            f"{config.active_actor_name} actor position is used only to identify "
-            "a segmentation label; "
-            "stored geometry uses the observed point centroid"
-        ),
+        "privileged_supervision": {
+            "active": (
+                f"{config.active_actor_name} actor position is used only to identify "
+                "a segmentation label; stored geometry uses the observed point centroid"
+            ),
+            "target": (
+                f"{config.target_actor_name} actor position is used only to identify "
+                "a segmentation label; stored target position uses the observed point "
+                "centroid"
+                if config.target_position_source == "segmented_actor_centroid"
+                else "stored target position comes from obs/extra/goal_pos"
+            ),
+        },
         "splits": {},
     }
     try:
@@ -455,7 +476,6 @@ def run(
                 xyzw = trajectory["obs/pointcloud/xyzw"]
                 segmentation = trajectory["obs/pointcloud/segmentation"]
                 tcp_poses = np.asarray(trajectory["obs/extra/tcp_pose"])
-                goal_positions = np.asarray(trajectory["obs/extra/goal_pos"])
                 qpos = np.asarray(trajectory["obs/agent/qpos"])
                 controller_actions = np.asarray(trajectory["actions"])
                 actor_path = f"env_states/actors/{config.active_actor_name}"
@@ -466,30 +486,92 @@ def run(
                 )
                 if len(controller_actions) != len(tcp_poses) - 1:
                     raise ValueError(f"{key} controller action/observation 长度不一致")
-                label, label_diagnostic = _infer_active_label(
+                active_label, active_label_diagnostic = _infer_actor_label(
                     xyzw=xyzw,
                     segmentation=segmentation,
-                    active_positions=active_positions,
+                    actor_positions=active_positions,
                     config=config,
+                    role="active",
                 )
+                target_label: int | None = None
+                target_label_diagnostic: dict[str, Any] | None = None
+                target_positions: np.ndarray | None = None
+                if config.target_position_source == "observation_goal_pos":
+                    goal_path = "obs/extra/goal_pos"
+                    if goal_path not in trajectory:
+                        raise KeyError(f"{key} 缺少 target observation：{goal_path}")
+                    target_positions = np.asarray(trajectory[goal_path])
+                else:
+                    target_actor_path = (
+                        f"env_states/actors/{config.target_actor_name}"
+                    )
+                    if target_actor_path not in trajectory:
+                        raise KeyError(
+                            f"{key} 缺少 target actor path：{target_actor_path}"
+                        )
+                    target_positions = np.asarray(
+                        trajectory[target_actor_path][:, :3]
+                    )
+                    target_label, target_label_diagnostic = _infer_actor_label(
+                        xyzw=xyzw,
+                        segmentation=segmentation,
+                        actor_positions=target_positions,
+                        config=config,
+                        role="target",
+                    )
+                if len(active_positions) != len(tcp_poses) or len(target_positions) != len(
+                    tcp_poses
+                ):
+                    raise ValueError(f"{key} actor/target 与 observation 长度不一致")
                 split = split_by_episode[key]
                 frame_errors = []
                 frame_point_counts = []
+                target_frame_errors = []
+                target_frame_point_counts = []
                 skipped_low_visibility = []
                 max_query_frame = len(tcp_poses) - 1 - (
                     config.horizon * config.frame_stride
                 )
                 for frame in range(max_query_frame + 1):
-                    points = _active_points(
+                    points = _segmented_points(
                         np.asarray(xyzw[frame]),
                         np.asarray(segmentation[frame]),
-                        label,
+                        active_label,
                     )
                     if len(points) < config.minimum_label_points:
                         skipped_low_visibility.append(
                             {"frame": frame, "visible_points": len(points)}
                         )
                         continue
+                    target_point_count: int | None = None
+                    target_centroid_error: float | None = None
+                    if target_label is None:
+                        goal_position = target_positions[frame]
+                    else:
+                        target_points = _segmented_points(
+                            np.asarray(xyzw[frame]),
+                            np.asarray(segmentation[frame]),
+                            target_label,
+                        )
+                        target_point_count = len(target_points)
+                        if target_point_count < config.minimum_label_points:
+                            skipped_low_visibility.append(
+                                {
+                                    "frame": frame,
+                                    "role": "target",
+                                    "visible_points": target_point_count,
+                                }
+                            )
+                            continue
+                        goal_position = target_points.mean(axis=0)
+                        target_centroid_error = float(
+                            np.linalg.norm(goal_position - target_positions[frame])
+                        )
+                        if target_centroid_error > config.maximum_centroid_error_m:
+                            raise ValueError(
+                                f"{key} frame={frame} target centroid error="
+                                f"{target_centroid_error:.4f} m 超限"
+                            )
                     center = points.mean(axis=0)
                     centroid_error = float(
                         np.linalg.norm(center - active_positions[frame])
@@ -514,7 +596,7 @@ def run(
                     geometry = _canonical_geometry(
                         active_points=points,
                         active_center=center,
-                        goal_position=goal_positions[frame],
+                        goal_position=goal_position,
                         tcp_poses=tcp_poses,
                         qpos=qpos,
                         frame=frame,
@@ -545,9 +627,12 @@ def run(
                             "task": config.task_id,
                             "episode": int(key.split("_")[1]),
                             "frame": frame,
-                            "active_label": label,
+                            "active_label": active_label,
                             "active_point_count": len(points),
                             "centroid_error_m": centroid_error,
+                            "target_label": target_label,
+                            "target_point_count": target_point_count,
+                            "target_centroid_error_m": target_centroid_error,
                         },
                         {
                             "active_points": sampled,
@@ -558,18 +643,37 @@ def run(
                     )
                     frame_errors.append(centroid_error)
                     frame_point_counts.append(len(points))
+                    if target_point_count is not None:
+                        target_frame_point_counts.append(target_point_count)
+                    if target_centroid_error is not None:
+                        target_frame_errors.append(target_centroid_error)
                 if not frame_errors:
                     raise ValueError(f"{key} 没有满足可见点门槛的 query frame")
                 diagnostics[split].append(
                     {
                         "trajectory": key,
-                        "active_label": label,
+                        "active_label": active_label,
+                        "target_label": target_label,
                         "chunks": len(frame_errors),
                         "skipped_low_visibility": skipped_low_visibility,
                         "point_count_min": min(frame_point_counts),
                         "point_count_max": max(frame_point_counts),
                         "centroid_error_max_m": max(frame_errors),
-                        **label_diagnostic,
+                        "active_label_inference": active_label_diagnostic,
+                        "target_label_inference": target_label_diagnostic,
+                        "target_point_count_min": (
+                            min(target_frame_point_counts)
+                            if target_frame_point_counts
+                            else None
+                        ),
+                        "target_point_count_max": (
+                            max(target_frame_point_counts)
+                            if target_frame_point_counts
+                            else None
+                        ),
+                        "target_centroid_error_max_m": (
+                            max(target_frame_errors) if target_frame_errors else None
+                        ),
                     }
                 )
 
@@ -584,6 +688,22 @@ def run(
                 [record["centroid_error_m"] for record in records],
                 dtype=np.float64,
             )
+            target_errors = np.asarray(
+                [
+                    record["target_centroid_error_m"]
+                    for record in records
+                    if record["target_centroid_error_m"] is not None
+                ],
+                dtype=np.float64,
+            )
+            target_point_counts = np.asarray(
+                [
+                    record["target_point_count"]
+                    for record in records
+                    if record["target_point_count"] is not None
+                ],
+                dtype=np.int64,
+            )
             summary["splits"][split] = {
                 "episodes": len(diagnostics[split]),
                 "chunks": len(records),
@@ -596,6 +716,19 @@ def run(
                     "p95": float(np.quantile(errors, 0.95)),
                     "max": float(errors.max()),
                 },
+                "target_observation": (
+                    {
+                        "point_count_min": int(target_point_counts.min()),
+                        "point_count_max": int(target_point_counts.max()),
+                        "centroid_error_m": {
+                            "mean": float(target_errors.mean()),
+                            "p95": float(np.quantile(target_errors, 0.95)),
+                            "max": float(target_errors.max()),
+                        },
+                    }
+                    if target_errors.size
+                    else {"source": "obs/extra/goal_pos"}
+                ),
                 "trajectories": diagnostics[split],
             }
         summary_path = temporary / "summary.json"

@@ -66,7 +66,11 @@ def run(h5_path: Path, json_path: Path, output_path: Path) -> None:
                 "obs/pointcloud/segmentation",
             )
             tcp_pose = _require(trajectory, "obs/extra/tcp_pose")
-            goal_pos = _require(trajectory, "obs/extra/goal_pos")
+            goal_pos = (
+                _require(trajectory, "obs/extra/goal_pos")
+                if "goal_pos" in trajectory["obs/extra"]
+                else None
+            )
             success = np.asarray(_require(trajectory, "success"), dtype=bool)
             if actions.ndim != 2 or actions.shape[1] != 7:
                 raise ValueError(f"{key} action shape 错误：{actions.shape}")
@@ -79,13 +83,14 @@ def run(h5_path: Path, json_path: Path, output_path: Path) -> None:
                 raise ValueError(
                     f"{key} obs/action 时序不一致：{observation_length}/{len(actions)}"
                 )
-            if not (
-                rgb.shape[0]
-                == segmentation.shape[0]
-                == tcp_pose.shape[0]
-                == goal_pos.shape[0]
-                == observation_length
-            ):
+            modality_lengths = [
+                rgb.shape[0],
+                segmentation.shape[0],
+                tcp_pose.shape[0],
+            ]
+            if goal_pos is not None:
+                modality_lengths.append(goal_pos.shape[0])
+            if not all(length == observation_length for length in modality_lengths):
                 raise ValueError(f"{key} observation modalities 长度不一致")
             if not np.isfinite(actions).all():
                 raise ValueError(f"{key} actions 含 NaN/Inf")
@@ -110,6 +115,7 @@ def run(h5_path: Path, json_path: Path, output_path: Path) -> None:
                     "sampled_valid_points_min": min(valid_counts),
                     "sampled_valid_points_max": max(valid_counts),
                     "sampled_segmentation_labels": sorted(labels),
+                    "has_goal_pos": goal_pos is not None,
                     "terminal_success": bool(success[-1]) if success.size else False,
                 }
             )
@@ -158,6 +164,9 @@ def run(h5_path: Path, json_path: Path, output_path: Path) -> None:
                 for record in trajectories
                 for label in record["sampled_segmentation_labels"]
             }
+        ),
+        "goal_pos_episode_count": sum(
+            int(record["has_goal_pos"]) for record in trajectories
         ),
         "trajectories": trajectories,
     }
