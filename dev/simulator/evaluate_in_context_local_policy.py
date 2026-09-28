@@ -22,6 +22,7 @@ from dev.simulator.train_maniskill_low_rank_transport import (
     TaskData,
     _load_task,
     _nearest_demo_indices,
+    _phase,
     _selection_hash,
 )
 
@@ -41,6 +42,8 @@ class LocalPolicyConfig:
     correction_limit_normalized: float
     minimum_demo_radius_normalized: float
     bootstrap_resamples: int
+    retrieval_top_k: int = 1
+    support_aware_selection: bool = False
 
     @classmethod
     def from_json(cls, path: Path) -> "LocalPolicyConfig":
@@ -53,9 +56,12 @@ class LocalPolicyConfig:
             self.correction_limit_normalized,
             self.minimum_demo_radius_normalized,
             self.bootstrap_resamples,
+            self.retrieval_top_k,
         )
         if not self.schema_version.strip() or min(positive) <= 0:
             raise ValueError("schema_version 与所有实验参数必须有效")
+        if self.support_aware_selection and self.retrieval_top_k < 2:
+            raise ValueError("support-aware selection 至少需要两个候选")
 
 
 def _git_commit(root: Path) -> str:
@@ -146,6 +152,95 @@ def _demo_radius_gate(
     return query_distance <= radius, query_distance, radius
 
 
+def _select_demo_indices(
+    task: TaskData,
+    config: LocalPolicyConfig,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
+    """以冻结的几何 rank-1 或 Demo support-aware 规则选择单个 chunk。"""
+    if not config.support_aware_selection:
+        indices, distances = _nearest_demo_indices(
+            candidate_records=task.train_records,
+            candidate_geometry=task.train_geometry,
+            query_records=task.val_records,
+            query_geometry=task.val_geometry,
+            exclude_same_episode=False,
+        )
+        return indices, indices, distances, {
+            "mode": "geometry_rank1",
+            "top_k": 1,
+            "selection_changed_rate": 0.0,
+        }
+    if task.train_geometry_sequence is None:
+        raise ValueError(f"{task.task_id} support-aware retrieval 缺少 sequence")
+
+    mean = task.train_geometry.mean(dim=0)
+    std = task.train_geometry.std(dim=0, unbiased=False).clamp_min(1e-4)
+    distances = torch.cdist(
+        (task.val_geometry - mean) / std,
+        (task.train_geometry - mean) / std,
+    ) / math.sqrt(task.train_geometry.shape[1])
+    phase_matched = (
+        _phase(task.val_geometry)[:, None]
+        == _phase(task.train_geometry)[None, :]
+    )
+    if bool((phase_matched.sum(dim=1) < config.retrieval_top_k).any()):
+        raise ValueError("至少一个 query 的同 phase candidate 数不足 top-K")
+    masked = distances.masked_fill(~phase_matched, torch.inf)
+    candidates = torch.argsort(masked, dim=1, stable=True)[
+        :, : config.retrieval_top_k
+    ]
+    candidate_sequence = task.train_geometry_sequence[candidates]
+    sequence = (
+        candidate_sequence[..., :POSITION_FEATURE_DIM]
+        / config.position_scale_m
+    )
+    initial = sequence[:, :, :1]
+    normalization = math.sqrt(POSITION_FEATURE_DIM)
+    path_distance = torch.linalg.vector_norm(
+        sequence - initial,
+        dim=3,
+    ) / normalization
+    radius = path_distance.max(dim=2).values.clamp_min(
+        config.minimum_demo_radius_normalized
+    )
+    query = (
+        task.val_geometry[:, None, :POSITION_FEATURE_DIM]
+        / config.position_scale_m
+    )
+    query_distance = torch.linalg.vector_norm(
+        query - initial[:, :, 0],
+        dim=2,
+    ) / normalization
+    support_ratio = query_distance / radius
+    contained = support_ratio <= 1.0
+    has_support = contained.any(dim=1)
+    supported_choice = support_ratio.masked_fill(~contained, torch.inf).argmin(dim=1)
+    choice = torch.where(
+        has_support,
+        supported_choice,
+        torch.zeros_like(supported_choice),
+    )
+    batch = torch.arange(len(choice))
+    selected = candidates[batch, choice]
+    rank1 = candidates[:, 0]
+    selected_distances = masked[batch, selected]
+    selected_ratio = support_ratio[batch, choice]
+    rank_counts = {
+        str(rank + 1): int((choice == rank).sum())
+        for rank in range(config.retrieval_top_k)
+    }
+    return selected, rank1, selected_distances, {
+        "mode": "top-k_demo_radius_support",
+        "top_k": config.retrieval_top_k,
+        "fallback": "geometry rank-1 when no candidate contains query",
+        "queries_with_supported_candidate": int(has_support.sum()),
+        "candidate_support_coverage": float(has_support.float().mean()),
+        "selection_changed_rate": float((selected != rank1).float().mean()),
+        "selected_candidate_rank_counts": rank_counts,
+        "selected_support_ratio": _distance_summary(selected_ratio),
+    }
+
+
 @torch.inference_mode()
 def _evaluate_task(
     task: TaskData,
@@ -153,13 +248,10 @@ def _evaluate_task(
 ) -> dict[str, Any]:
     if task.train_geometry_sequence is None:
         raise ValueError(f"{task.task_id} 缺少 geometry_sequence")
-    indices, retrieval_distances = _nearest_demo_indices(
-        candidate_records=task.train_records,
-        candidate_geometry=task.train_geometry,
-        query_records=task.val_records,
-        query_geometry=task.val_geometry,
-        exclude_same_episode=False,
+    indices, rank1_indices, retrieval_distances, retrieval_diagnostics = (
+        _select_demo_indices(task, config)
     )
+    rank1_actions = task.train_actions[rank1_indices]
     demo_actions = task.train_actions[indices]
     demo_sequence = task.train_geometry_sequence[indices]
     operator, condition_number = _fit_local_translation_operator(
@@ -189,6 +281,11 @@ def _evaluate_task(
         position_scale_m=config.position_scale_m,
         minimum_radius=config.minimum_demo_radius_normalized,
     )
+    if config.support_aware_selection:
+        expected = retrieval_diagnostics["candidate_support_coverage"]
+        observed = float(accepted.float().mean())
+        if not math.isclose(observed, expected, abs_tol=1e-7):
+            raise RuntimeError("support-aware selection 与 Demo-radius gate 不一致")
     gated_prediction = torch.where(
         accepted[:, None, None],
         raw_prediction,
@@ -209,11 +306,19 @@ def _evaluate_task(
         "translation_threshold_m": task.translation_threshold_m,
         "rotation_threshold_rad": task.rotation_threshold_rad,
     }
-    predictions = {
-        "retrieved_demo_copy": demo_actions,
-        "raw_in_context_local_policy": raw_prediction,
-        "demo_radius_gated_local_policy": gated_prediction,
-    }
+    if config.support_aware_selection:
+        predictions = {
+            "geometry_rank1_copy": rank1_actions,
+            "support_aware_demo_copy": demo_actions,
+            "raw_support_aware_local_policy": raw_prediction,
+            "gated_support_aware_local_policy": gated_prediction,
+        }
+    else:
+        predictions = {
+            "retrieved_demo_copy": demo_actions,
+            "raw_in_context_local_policy": raw_prediction,
+            "demo_radius_gated_local_policy": gated_prediction,
+        }
     metrics = {
         name: _physical_metrics(value, task.val_actions, mask, **options)
         for name, value in predictions.items()
@@ -241,13 +346,40 @@ def _evaluate_task(
             **options,
         ),
     }
+    if config.support_aware_selection:
+        bootstrap.update(
+            {
+                "selected_copy_minus_rank1_copy": _bootstrap_comparison(
+                    reference=rank1_actions,
+                    candidate=demo_actions,
+                    target=task.val_actions,
+                    mask=mask,
+                    group_ids=groups,
+                    seed=config.seed + 200,
+                    resamples=config.bootstrap_resamples,
+                    **options,
+                ),
+                "gated_minus_rank1_copy": _bootstrap_comparison(
+                    reference=rank1_actions,
+                    candidate=gated_prediction,
+                    target=task.val_actions,
+                    mask=mask,
+                    group_ids=groups,
+                    seed=config.seed + 300,
+                    resamples=config.bootstrap_resamples,
+                    **options,
+                ),
+            }
+        )
     bounded_norm = torch.linalg.vector_norm(correction, dim=1)
     return {
         "train_queries": len(task.train_records),
         "validation_queries": len(task.val_records),
         "validation_episodes": len({row["episode"] for row in task.val_records}),
         "validation_demo_selection_sha256": _selection_hash(indices),
+        "geometry_rank1_selection_sha256": _selection_hash(rank1_indices),
         "retrieval_distance": _distance_summary(retrieval_distances),
+        "retrieval_diagnostics": retrieval_diagnostics,
         "metrics": metrics,
         "paired_episode_bootstrap": bootstrap,
         "local_policy_diagnostics": {
@@ -292,7 +424,11 @@ def run(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "protocol": {
             "status": "preregistered zero-training analytic experiment",
-            "retrieval": "frozen per-task standardized 17D geometry and phase match",
+            "retrieval": (
+                "phase-matched geometry top-K then Demo-radius support selection"
+                if config.support_aware_selection
+                else "frozen per-task standardized 17D geometry rank-1 and phase match"
+            ),
             "local_identification": (
                 "per-Demo centered ridge from H pairs of observed 6D position "
                 "relation to normalized 3D translation action"
