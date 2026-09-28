@@ -122,9 +122,6 @@ def _seed_everything(seed: int) -> None:
 
 def _load_task(root: Path) -> TaskData:
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
-    task_id = str(summary.get("config", {}).get("task_id", ""))
-    if not task_id:
-        raise ValueError(f"{root} summary 缺少 task_id")
     scales, translation, rotation, representation = _action_protocol(root)
     train_records, train_geometry, train_actions = _load_split(
         root,
@@ -132,6 +129,20 @@ def _load_task(root: Path) -> TaskData:
         scales,
     )
     val_records, val_geometry, val_actions = _load_split(root, "val", scales)
+    task_id = str(
+        summary.get("config", {}).get("task_id")
+        or summary.get("source", {}).get("env_info", {}).get("env_id")
+        or (train_records[0].get("task") if train_records else "")
+    )
+    if not task_id:
+        raise ValueError(f"{root} summary/manifest 缺少 task_id")
+    record_tasks = {
+        str(record.get("task", "")) for record in train_records + val_records
+    }
+    if record_tasks != {task_id}:
+        raise ValueError(
+            f"{root} task_id={task_id} 与 manifest tasks={sorted(record_tasks)} 不一致"
+        )
     return TaskData(
         task_id=task_id,
         root=root,
