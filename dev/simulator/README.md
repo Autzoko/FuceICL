@@ -51,3 +51,6 @@ sbatch src/scripts/hpc/preprocess_maniskill_chunks.slurm \
   /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
   /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1
 ```
+
+产物生成后运行 `audit_maniskill_chunks.py`，核对 shard allowlist、shape/finite/range、H-step
+target frames、episode split 隔离与动作尺度；审计通过前不训练 Predictor。
