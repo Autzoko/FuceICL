@@ -54,3 +54,13 @@ sbatch src/scripts/hpc/preprocess_maniskill_chunks.slurm \
 
 产物生成后运行 `audit_maniskill_chunks.py`，核对 shard allowlist、shape/finite/range、H-step
 target frames、episode split 隔离与动作尺度；审计通过前不训练 Predictor。
+
+审计通过后先运行 zero-training Demo-prior baseline，验证 17D geometry retrieval 是否足以从
+train episodes 为 validation query 找到有用 action chunk：
+
+```bash
+sbatch src/scripts/hpc/evaluate_maniskill_demo_prior.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_demo_prior_v1.json
+```
