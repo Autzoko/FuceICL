@@ -26,6 +26,10 @@ from dev.predictor.jacobian_transport_model import (
     LocalJacobianActionTransport,
 )
 from dev.predictor.train_action_chunks import _denormalize_actions
+from dev.simulator.action_grammar import (
+    DiscreteActionGrammar,
+    infer_gripper_grammar,
+)
 from dev.simulator.evaluate_maniskill_demo_prior import (
     _action_protocol,
     _load_split,
@@ -59,6 +63,7 @@ CHUNK_POLICIES = frozenset(
         "geometry_rank1_copy_h6",
         "phase_matched_copy_h6",
         "phase_factorized_transport_h6",
+        "phase_factorized_transport_h6_grammar",
     )
 )
 SUPPORTED_POLICIES = frozenset((*POLICIES, *CHUNK_POLICIES))
@@ -524,6 +529,18 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         int(step.get("transport_translation_components_total", 0))
         for step in steps
     )
+    open_to_close = 0
+    close_to_open = 0
+    for record in records:
+        symbols = [
+            int(float(step["canonical_first_action"][6]) >= 0.5)
+            for step in record["step_records"]
+        ]
+        open_to_close += sum(a == 1 and b == 0 for a, b in zip(symbols, symbols[1:]))
+        close_to_open += sum(a == 0 and b == 1 for a, b in zip(symbols, symbols[1:]))
+    grammar_projections = sum(
+        bool(step.get("grammar_projected", False)) for step in steps
+    )
     return {
         "episodes": len(records),
         "successes": sum(successes),
@@ -603,6 +620,12 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "transport_translation_component_clip_rate": (
             transport_clipped / transport_total if transport_total else None
         ),
+        "gripper_transition_counts": {
+            "open_to_close": open_to_close,
+            "close_to_open": close_to_open,
+        },
+        "grammar_projections": grammar_projections,
+        "grammar_projection_rate": grammar_projections / len(steps),
         "post_grasp_open_command_rate": (
             float(
                 np.mean(
@@ -753,7 +776,11 @@ def run(
         geometry_std = computed_std
 
     phase_policy_requested = bool(
-        {"phase_matched_copy_h6", "phase_factorized_transport_h6"}
+        {
+            "phase_matched_copy_h6",
+            "phase_factorized_transport_h6",
+            "phase_factorized_transport_h6_grammar",
+        }
         & set(config.policies)
     )
     train_phase_cpu = phase_ids(train_geometry_cpu)
@@ -795,6 +822,13 @@ def run(
                 for index, value in enumerate(phase_weights_cpu)
             },
         }
+    grammar_requested = "phase_factorized_transport_h6_grammar" in config.policies
+    action_grammar: DiscreteActionGrammar | None = None
+    if grammar_requested:
+        action_grammar = infer_gripper_grammar(
+            records=train_records,
+            normalized_actions=train_actions_cpu,
+        )
     train_geometry = train_geometry_cpu.to(device)
     train_actions = train_actions_cpu.to(device)
     train_phase = train_phase_cpu.to(device)
@@ -834,6 +868,7 @@ def run(
                 buffered_plan_step = 0
                 buffered_phase: int | None = None
                 buffered_transport_diagnostics: dict[str, float | int] | None = None
+                grammar_phase_index = 0
                 step_records = []
                 success = _scalar_bool(reset_info.get("success", False))
                 initial_success = success
@@ -864,6 +899,16 @@ def run(
                             raise ValueError(
                                 f"seed={seed} 跨 policy 初始状态差异 {difference:.4g}"
                             )
+                        if policy == "phase_factorized_transport_h6_grammar":
+                            if action_grammar is None:
+                                raise ValueError("grammar policy 缺少 action grammar")
+                            initial_symbol = int(
+                                _gripper_open(context.qpos) >= 0.5
+                            )
+                            if initial_symbol != action_grammar.symbols[0]:
+                                raise ValueError(
+                                    "runtime 初始 gripper 与 Demo grammar 不一致"
+                                )
                     if policy in CHUNK_POLICIES:
                         _sync(device)
                         policy_started = time.perf_counter()
@@ -906,14 +951,33 @@ def run(
                                     execution_horizon=train_actions.shape[1],
                                     apply_transport=(
                                         policy
-                                        == "phase_factorized_transport_h6"
+                                        in {
+                                            "phase_factorized_transport_h6",
+                                            "phase_factorized_transport_h6_grammar",
+                                        }
                                     ),
                                     device=device,
                                 )
                             buffered_actions = [token for token in plan]
                             buffered_plan_length = len(buffered_actions)
                             buffered_plan_step = 0
-                        canonical = buffered_actions.pop(0)
+                        canonical = buffered_actions.pop(0).copy()
+                        planned_canonical = canonical.copy()
+                        grammar_phase_before = grammar_phase_index
+                        grammar_projected = False
+                        if policy == "phase_factorized_transport_h6_grammar":
+                            if action_grammar is None:
+                                raise ValueError("grammar policy 缺少 action grammar")
+                            desired_symbol = int(canonical[6] >= 0.5)
+                            (
+                                executed_symbol,
+                                grammar_phase_index,
+                                grammar_projected,
+                            ) = action_grammar.project(
+                                desired_symbol,
+                                grammar_phase_index,
+                            )
+                            canonical[6] = float(executed_symbol)
                         converted = canonical_to_controller(
                             canonical,
                             context.tcp_pose,
@@ -939,6 +1003,7 @@ def run(
                                 if buffered_phase is None
                                 else PHASE_NAMES[buffered_phase]
                             ),
+                            "canonical_planned_action": planned_canonical.tolist(),
                             "canonical_first_action": canonical.tolist(),
                             "controller_action": action.tolist(),
                             "translation_clipped": (
@@ -954,6 +1019,9 @@ def run(
                             "replanned": replanned,
                             "plan_step": buffered_plan_step,
                             "plan_length": buffered_plan_length,
+                            "grammar_projected": grammar_projected,
+                            "grammar_phase_before": grammar_phase_before,
+                            "grammar_phase_after": grammar_phase_index,
                             "transport_translation_components_clipped": (
                                 int(
                                     buffered_transport_diagnostics[
@@ -1099,6 +1167,10 @@ def run(
         ("geometry_rank1_copy_h6", "phase_matched_copy_h6"),
         ("phase_matched_copy_h6", "phase_factorized_transport_h6"),
         ("geometry_rank1_copy_h6", "phase_factorized_transport_h6"),
+        (
+            "phase_factorized_transport_h6",
+            "phase_factorized_transport_h6_grammar",
+        ),
     )
     for offset, (reference, candidate) in enumerate(pairs):
         if reference not in successes or candidate not in successes:
@@ -1165,6 +1237,9 @@ def run(
         ),
         "config_sha256": _sha256(config_path),
         "phase_transport_fit": phase_fit,
+        "action_grammar": (
+            None if action_grammar is None else action_grammar.to_dict()
+        ),
         "active_label_from_train_manifest": active_label,
         "seed_overlap_with_replay": [],
         "runtime_controller": runtime_controller,
