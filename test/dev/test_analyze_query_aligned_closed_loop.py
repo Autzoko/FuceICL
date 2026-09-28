@@ -86,3 +86,8 @@ def test_support_drift_analysis_contract() -> None:
         assert checks["all_initial_retrievals_identical"]
         assert checks["bcsg_ood_fraction_increases_first_to_last_bin"]
         assert checks["bcsg_gate_does_not_decrease_ood"]
+        initial = report["aggregate"]["bcsg_h6"][
+            "episodes_by_initial_support"
+        ]
+        assert initial["initial_in_support"]["episodes"] == 6
+        assert initial["initial_ood"]["episodes"] == 0

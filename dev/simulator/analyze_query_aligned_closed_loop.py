@@ -261,6 +261,27 @@ def _summarize_policy(
                 ]
             ),
         }
+    episodes_by_initial_support = {}
+    for label, initial_ood in (
+        ("initial_in_support", False),
+        ("initial_ood", True),
+    ):
+        rows = [
+            row
+            for row in episode_rows
+            if bool(row["initial_ood"]) == initial_ood
+        ]
+        episodes_by_initial_support[label] = {
+            "episodes": len(rows),
+            "success": _rate([bool(row["success"]) for row in rows]),
+            "initial_distance": _stats(
+                [float(row["initial_distance"]) for row in rows]
+            ),
+            "ever_ood": _rate([bool(row["ever_ood"]) for row in rows]),
+            "maximum_distance": _stats(
+                [float(row["maximum_distance"]) for row in rows]
+            ),
+        }
     gates = [
         float(row["predicted_gate"])
         for row in replan_rows
@@ -275,6 +296,7 @@ def _summarize_policy(
         "time_bins": by_time,
         "support_groups": support_groups,
         "episodes_by_support": episodes_by_support,
+        "episodes_by_initial_support": episodes_by_initial_support,
         "gate_correlations": {
             "gate_vs_retrieval_distance": _correlations(
                 gates,
