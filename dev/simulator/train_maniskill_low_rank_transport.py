@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -10,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shutil
 import subprocess
 import time
 from typing import Any, Sequence
@@ -392,6 +394,11 @@ def run(
         raise FileExistsError(f"输出目录已存在，拒绝覆盖：{output_root}")
     temporary = output_root.with_name(f".{output_root.name}.incomplete-{os.getpid()}")
     temporary.mkdir(parents=True)
+
+    def cleanup_incomplete() -> None:
+        shutil.rmtree(temporary, ignore_errors=True)
+
+    atexit.register(cleanup_incomplete)
     _seed_everything(config.seed)
 
     tasks = [_load_task(root) for root in data_roots]
@@ -639,6 +646,7 @@ def run(
         encoding="utf-8",
     )
     temporary.rename(output_root)
+    atexit.unregister(cleanup_incomplete)
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
 
 

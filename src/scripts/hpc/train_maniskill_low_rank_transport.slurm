@@ -38,6 +38,14 @@ data_arguments=()
 for data_root in "$@"; do
     data_arguments+=(--data-root "${data_root}")
 done
+held_out_arguments=()
+if [[ -n "${FUSEICL_HELD_OUT_TASK:-}" ]]; then
+    if [[ ! "${FUSEICL_HELD_OUT_TASK}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo "FUSEICL_HELD_OUT_TASK 含非法字符" >&2
+        exit 2
+    fi
+    held_out_arguments+=(--held-out-task "${FUSEICL_HELD_OUT_TASK}")
+fi
 
 conda run --no-capture-output -n "${ENV_NAME}" \
     python -m dev.simulator.train_maniskill_low_rank_transport \
@@ -45,4 +53,5 @@ conda run --no-capture-output -n "${ENV_NAME}" \
     --output-root "${OUTPUT_ROOT}" \
     --config "${CONFIG_PATH}" \
     --device cuda \
+    "${held_out_arguments[@]}" \
     "${data_arguments[@]}"
