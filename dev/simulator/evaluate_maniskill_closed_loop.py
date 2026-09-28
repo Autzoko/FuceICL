@@ -76,11 +76,10 @@ class ClosedLoopConfig:
         if (
             not self.policies
             or len(set(self.policies)) != len(self.policies)
-            or self.policies[0] != "zero_pose_hold_gripper"
             or not set(self.policies).issubset(SUPPORTED_POLICIES)
         ):
             raise ValueError(
-                "policies 必须唯一、以 zero baseline 开头且属于支持集合"
+                "policies 必须非空、唯一且属于支持集合"
             )
         if min(
             self.max_episode_steps,
@@ -96,6 +95,7 @@ class ClosedLoopConfig:
 class ObservationContext:
     geometry: torch.Tensor | None
     tcp_pose: np.ndarray
+    goal_position: np.ndarray
     qpos: np.ndarray
     active_center: np.ndarray | None
     visible_points: int
@@ -156,7 +156,14 @@ def _observation_context(
     points = _active_points(xyzw, segmentation, active_label)
     center = points.mean(axis=0) if len(points) else None
     if len(points) < minimum_label_points:
-        return ObservationContext(None, tcp_pose, qpos, center, len(points))
+        return ObservationContext(
+            None,
+            tcp_pose,
+            goal_position,
+            qpos,
+            center,
+            len(points),
+        )
     previous = tcp_pose if previous_tcp_pose is None else previous_tcp_pose
     geometry = _canonical_geometry(
         active_points=points,
@@ -169,6 +176,7 @@ def _observation_context(
     return ObservationContext(
         torch.from_numpy(geometry).float(),
         tcp_pose,
+        goal_position,
         qpos,
         center,
         len(points),
@@ -386,11 +394,43 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for record in records
         if record["success_step"] is not None
     ]
+    grasp_steps = [
+        next(
+            (
+                int(step["step"])
+                for step in record["step_records"]
+                if bool(step.get("is_grasped", False))
+            ),
+            None,
+        )
+        for record in records
+    ]
+    placed_steps = [
+        next(
+            (
+                int(step["step"])
+                for step in record["step_records"]
+                if bool(step.get("is_obj_placed", False))
+            ),
+            None,
+        )
+        for record in records
+    ]
     return {
         "episodes": len(records),
         "successes": sum(successes),
         "success_rate": float(np.mean(successes)),
         "success_step": _stats(success_steps),
+        "episodes_ever_grasped": sum(step is not None for step in grasp_steps),
+        "first_grasp_step": _stats(
+            [step for step in grasp_steps if step is not None]
+        ),
+        "episodes_ever_object_placed": sum(
+            step is not None for step in placed_steps
+        ),
+        "first_object_placed_step": _stats(
+            [step for step in placed_steps if step is not None]
+        ),
         "executed_steps": len(steps),
         "replans": sum(bool(step.get("replanned", True)) for step in steps),
         "refusals": sum(bool(step["refusal"]) for step in steps),
@@ -422,6 +462,20 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         ),
         "visible_points": _stats(
             [float(step["visible_points"]) for step in steps]
+        ),
+        "observed_tcp_to_object_m": _stats(
+            [
+                float(step["observed_tcp_to_object_m"])
+                for step in steps
+                if step["observed_tcp_to_object_m"] is not None
+            ]
+        ),
+        "observed_object_to_goal_m": _stats(
+            [
+                float(step["observed_object_to_goal_m"])
+                for step in steps
+                if step["observed_object_to_goal_m"] is not None
+            ]
         ),
     }
 
@@ -657,6 +711,24 @@ def run(
                     action_record["preprocessing_latency_ms"] = (
                         preprocessing_latency_ms
                     )
+                    action_record["observed_tcp_to_object_m"] = (
+                        None
+                        if context.active_center is None
+                        else float(
+                            np.linalg.norm(
+                                context.active_center - context.tcp_pose[:3]
+                            )
+                        )
+                    )
+                    action_record["observed_object_to_goal_m"] = (
+                        None
+                        if context.active_center is None
+                        else float(
+                            np.linalg.norm(
+                                context.active_center - context.goal_position
+                            )
+                        )
+                    )
                     action_record["end_to_end_policy_latency_ms"] = (
                         preprocessing_latency_ms
                         + float(action_record["policy_latency_ms"])
@@ -677,6 +749,15 @@ def run(
                             "success": step_success,
                             "terminated": _scalar_bool(terminated),
                             "truncated": _scalar_bool(truncated),
+                            "is_grasped": _scalar_bool(
+                                info.get("is_grasped", False)
+                            ),
+                            "is_obj_placed": _scalar_bool(
+                                info.get("is_obj_placed", False)
+                            ),
+                            "is_robot_static": _scalar_bool(
+                                info.get("is_robot_static", False)
+                            ),
                             "environment_step_latency_ms": environment_latency_ms,
                         }
                     )
@@ -760,6 +841,10 @@ def run(
                 "stop" if config.stop_on_truncation else "record but continue"
             ),
             "refusal": "visible active points < threshold; zero/hold action",
+            "phase_diagnostics": (
+                "environment is_grasped/is_obj_placed/is_robot_static are "
+                "logged only after action execution and never used by policy"
+            ),
             "seed_split": "all rollout seeds disjoint from 32 replay episodes",
         },
         "config": asdict(config),

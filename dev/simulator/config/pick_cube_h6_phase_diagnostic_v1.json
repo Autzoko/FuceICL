@@ -1,0 +1,30 @@
+{
+  "schema_version": "maniskill-pick-cube-h6-phase-diagnostic-v1",
+  "seeds": [
+    460512526,
+    752152622,
+    1138625291,
+    1685177090,
+    1864590975,
+    1104527590,
+    1631896637,
+    193224628,
+    2123560340,
+    1880420,
+    605579951,
+    1158354683,
+    475594996,
+    779694402,
+    1111367784,
+    1409054072
+  ],
+  "policies": [
+    "geometry_rank1_copy_h6"
+  ],
+  "max_episode_steps": 100,
+  "minimum_label_points": 8,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "bootstrap_resamples": 10000,
+  "stop_on_truncation": false
+}
