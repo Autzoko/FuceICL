@@ -16,6 +16,13 @@ import numpy as np
 import torch
 
 from dev.pointnet.compare_retrievers import _sha256
+from dev.predictor.in_context_local_policy import (
+    POSITION_FEATURE_DIM,
+    TRANSLATION_ACTION_DIM,
+    bounded_translation_correction as _bounded_correction,
+    demo_radius_gate as _demo_radius_gate,
+    fit_local_translation_operator as _fit_local_translation_operator,
+)
 from dev.predictor.train_action_chunks import _physical_metrics
 from dev.simulator.evaluate_maniskill_demo_prior import _bootstrap_comparison
 from dev.simulator.train_maniskill_low_rank_transport import (
@@ -25,10 +32,6 @@ from dev.simulator.train_maniskill_low_rank_transport import (
     _phase,
     _selection_hash,
 )
-
-
-POSITION_FEATURE_DIM = 6
-TRANSLATION_ACTION_DIM = 3
 
 
 @dataclass(frozen=True)
@@ -82,74 +85,6 @@ def _distance_summary(values: torch.Tensor) -> dict[str, float]:
         "p95": float(torch.quantile(values, 0.95)),
         "max": float(values.max()),
     }
-
-
-def _fit_local_translation_operator(
-    demo_geometry_sequence: torch.Tensor,
-    demo_actions: torch.Tensor,
-    *,
-    position_scale_m: float,
-    ridge_lambda: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """对每个 Demo 独立拟合 6D geometry 到 3D translation 的 ridge 算子。"""
-    horizon = demo_actions.shape[1]
-    if demo_geometry_sequence.shape[:2] != (len(demo_actions), horizon + 1):
-        raise ValueError("Demo geometry sequence 与 action horizon 不匹配")
-    features = (
-        demo_geometry_sequence[:, :horizon, :POSITION_FEATURE_DIM]
-        / position_scale_m
-    )
-    translations = demo_actions[..., :TRANSLATION_ACTION_DIM]
-    centered_features = features - features.mean(dim=1, keepdim=True)
-    centered_actions = translations - translations.mean(dim=1, keepdim=True)
-    transpose = centered_features.transpose(1, 2)
-    identity = torch.eye(
-        POSITION_FEATURE_DIM,
-        dtype=features.dtype,
-        device=features.device,
-    )[None]
-    regularized_gram = transpose @ centered_features + ridge_lambda * identity
-    operator = torch.linalg.solve(regularized_gram, transpose @ centered_actions)
-    condition_number = torch.linalg.cond(regularized_gram)
-    return operator, condition_number
-
-
-def _bounded_correction(
-    query_geometry: torch.Tensor,
-    demo_geometry_sequence: torch.Tensor,
-    operator: torch.Tensor,
-    *,
-    position_scale_m: float,
-    correction_limit: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    delta = (
-        query_geometry[:, :POSITION_FEATURE_DIM]
-        - demo_geometry_sequence[:, 0, :POSITION_FEATURE_DIM]
-    ) / position_scale_m
-    raw = torch.bmm(delta[:, None, :], operator).squeeze(1)
-    raw_norm = torch.linalg.vector_norm(raw, dim=1)
-    multiplier = torch.clamp(correction_limit / raw_norm.clamp_min(1e-12), max=1.0)
-    return raw * multiplier[:, None], raw_norm, raw_norm > correction_limit
-
-
-def _demo_radius_gate(
-    query_geometry: torch.Tensor,
-    demo_geometry_sequence: torch.Tensor,
-    *,
-    position_scale_m: float,
-    minimum_radius: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    sequence = (
-        demo_geometry_sequence[..., :POSITION_FEATURE_DIM] / position_scale_m
-    )
-    initial = sequence[:, :1]
-    normalization = math.sqrt(POSITION_FEATURE_DIM)
-    path_distance = torch.linalg.vector_norm(sequence - initial, dim=2) / normalization
-    radius = path_distance.max(dim=1).values.clamp_min(minimum_radius)
-    query = query_geometry[:, :POSITION_FEATURE_DIM] / position_scale_m
-    query_distance = torch.linalg.vector_norm(query - initial[:, 0], dim=1)
-    query_distance = query_distance / normalization
-    return query_distance <= radius, query_distance, radius
 
 
 def _select_demo_indices(

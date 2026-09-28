@@ -21,6 +21,11 @@ import sapien
 import torch
 
 from dev.pointnet.compare_retrievers import _sha256
+from dev.predictor.in_context_local_policy import (
+    bounded_translation_correction,
+    demo_radius_gate,
+    fit_local_translation_operator,
+)
 from dev.predictor.jacobian_transport_model import (
     JacobianTransportConfig,
     LocalJacobianActionTransport,
@@ -33,11 +38,6 @@ from dev.simulator.action_grammar import (
 from dev.simulator.evaluate_maniskill_demo_prior import (
     _action_protocol,
     _load_split,
-)
-from dev.simulator.evaluate_in_context_local_policy import (
-    _bounded_correction,
-    _demo_radius_gate,
-    _fit_local_translation_operator,
 )
 from dev.simulator.maniskill_action_bridge import (
     audit_round_trip,
@@ -524,13 +524,13 @@ def _in_context_local_policy_chunk(
     demo_sequence = train_geometry_sequence[
         selected_index : selected_index + 1
     ]
-    operator, condition_number = _fit_local_translation_operator(
+    operator, condition_number = fit_local_translation_operator(
         demo_sequence,
         demo_actions,
         position_scale_m=config.in_context_position_scale_m,
         ridge_lambda=config.in_context_ridge_lambda,
     )
-    correction, raw_norm, correction_clipped = _bounded_correction(
+    correction, raw_norm, correction_clipped = bounded_translation_correction(
         query[None],
         demo_sequence,
         operator,
@@ -541,7 +541,7 @@ def _in_context_local_policy_chunk(
     unconstrained = transported[..., :3] + correction[:, None]
     transported[..., :3] = unconstrained.clamp(-1.0, 1.0)
     action_clipped = unconstrained != transported[..., :3]
-    accepted, query_distance, demo_radius = _demo_radius_gate(
+    accepted, query_distance, demo_radius = demo_radius_gate(
         query[None],
         demo_sequence,
         position_scale_m=config.in_context_position_scale_m,
