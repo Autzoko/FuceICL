@@ -339,7 +339,8 @@ def run(
         policy: [] for policy in config.policies
     }
     offline_audits = []
-    initial_pose_max_abs_difference = 0.0
+    initial_translation_error_max_m = 0.0
+    initial_rotation_error_max_rad = 0.0
     try:
         runtime_controller = _audit_runtime_controller(environment, config)
         round_trip = audit_round_trip(
@@ -378,16 +379,25 @@ def run(
                     environment.unwrapped.set_state_dict(initial_env_state)
                     observation = environment.unwrapped.get_obs()
                     initial_pose = _tcp_pose(observation)
-                    initial_difference = float(
-                        np.max(np.abs(initial_pose - logged_tcp[0]))
+                    initial_translation_error, initial_rotation_error = (
+                        _pose_error(initial_pose, logged_tcp[0])
                     )
-                    initial_pose_max_abs_difference = max(
-                        initial_pose_max_abs_difference, initial_difference
+                    initial_translation_error_max_m = max(
+                        initial_translation_error_max_m,
+                        initial_translation_error,
                     )
-                    if initial_difference > 5e-3:
+                    initial_rotation_error_max_rad = max(
+                        initial_rotation_error_max_rad,
+                        initial_rotation_error,
+                    )
+                    if (
+                        initial_translation_error > 5e-3
+                        or initial_rotation_error > 5e-2
+                    ):
                         raise ValueError(
-                            f"episode {episode_id} 初始 TCP 与 replay 差异 "
-                            f"{initial_difference:.4g}"
+                            f"episode {episode_id} 初始 TCP 与 replay 差异："
+                            f"translation={initial_translation_error:.4g} m, "
+                            f"rotation={initial_rotation_error:.4g} rad"
                         )
                     initial_info = environment.unwrapped.evaluate()
                     success = _scalar_bool(initial_info.get("success", False))
@@ -483,7 +493,10 @@ def run(
         "config_sha256": _sha256(config_path),
         "runtime_controller": runtime_controller,
         "controller_round_trip": round_trip,
-        "initial_tcp_pose_max_abs_difference": initial_pose_max_abs_difference,
+        "initial_tcp_translation_error_max_m": (
+            initial_translation_error_max_m
+        ),
+        "initial_tcp_rotation_error_max_rad": initial_rotation_error_max_rad,
         "offline_command_audits": offline_audits,
         "policy_summaries": {
             policy: _summarize(rows) for policy, rows in rollouts.items()
