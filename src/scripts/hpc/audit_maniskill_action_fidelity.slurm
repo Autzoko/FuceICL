@@ -9,6 +9,8 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
+# 非 login Slurm shell 不保证预加载 Environment Modules；profile 必须在 nounset 前读取。
+source /etc/profile
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"
@@ -19,8 +21,6 @@ readonly CONFIG_PATH="${5:-dev/simulator/config/pick_cube_action_fidelity_v1.jso
 readonly ENV_NAME="FuseICL-maniskill"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 
-# 非 login Slurm shell 不保证预加载 Environment Modules。
-source /etc/profile
 module purge
 module load miniconda/3-4.11.0
 
