@@ -1,0 +1,17 @@
+{
+  "seed": 20260928,
+  "epochs": 40,
+  "batch_size": 128,
+  "learning_rate": 0.0005,
+  "weight_decay": 0.0001,
+  "dependency_weight": 0.2,
+  "dependency_margin": 0.1,
+  "gradient_clip_norm": 1.0,
+  "hidden_dim": 256,
+  "dropout": 0.1,
+  "residual_limit": 2.0,
+  "retriever_batch_size": 64,
+  "retriever_num_workers": 4,
+  "text_group_budget": 10,
+  "text_score_weight": 0.15
+}

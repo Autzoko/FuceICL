@@ -1,0 +1,24 @@
+# Demo-Conditioned Predictor Pilot
+
+本目录先验证一个必要机制：在相同 query observation 下，正确 Demo 是否比随机或错误阶段
+Demo 更能预测未来动作。Pilot 复用 RLBench v4 的 12-frame 聚合监督，只预测
+`[delta_xyz, delta_axis_angle, gripper_delta]`，不把该结果视为最终 action-chunk 性能。
+
+三个受控模型：
+
+- `query_only`：只看 query context 的行为克隆下界；
+- `demo_concat`：直接拼接 query、Demo context 和 Demo action；
+- `demo_action_prior`：以 Demo action 为基点，query 只能门控有限残差，并加入反事实
+  Demo utility margin。
+
+评估使用 oracle、真实 Retriever、random-same-task、wrong-phase、wrong-layout、no-demo 和
+shuffled-action 条件。主模型没有有效 Demo 时严格输出零，用结构保证它不能成为普通观测策略。
+
+```bash
+sbatch src/scripts/hpc/train_open_loop_predictor.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/training/open_loop_predictor_v1
+```
