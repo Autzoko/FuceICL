@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from contextlib import redirect_stdout
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -70,7 +72,8 @@ def test_aggregate_three_tasks() -> None:
             _write_report(path, task)
             paths.append(path)
         output = root / "aggregate.json"
-        run(project_root=root, report_paths=paths, output_path=output)
+        with redirect_stdout(io.StringIO()):
+            run(project_root=root, report_paths=paths, output_path=output)
         report = json.loads(output.read_text(encoding="utf-8"))
         assert report["pooled"]["bcsg_h6"]["successes"] == 6
         assert report["protocol"]["task_seed_pairs"] == 6
