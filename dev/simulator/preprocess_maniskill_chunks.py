@@ -34,6 +34,9 @@ class ManiSkillChunkConfig:
     maximum_centroid_error_m: float
     validation_episodes: int
     shard_size: int
+    action_representation: str = "cumulative_observation_delta"
+    position_limit_m: float = 0.1
+    rotation_scale_rad: float = -0.1
 
     @classmethod
     def from_json(cls, path: Path) -> "ManiSkillChunkConfig":
@@ -54,6 +57,18 @@ class ManiSkillChunkConfig:
         )
         if min(positive) <= 0:
             raise ValueError("chunk、点数、阈值与 episode 数必须为正")
+        if self.action_representation not in (
+            "cumulative_observation_delta",
+            "canonical_controller_command",
+        ):
+            raise ValueError("未知 action representation")
+        if (
+            self.action_representation == "canonical_controller_command"
+            and self.frame_stride != 1
+        ):
+            raise ValueError("controller command chunks 当前只支持 frame_stride=1")
+        if self.position_limit_m <= 0 or self.rotation_scale_rad == 0:
+            raise ValueError("controller position/rotation scale 非法")
 
 
 def _sha256(path: Path) -> str:
@@ -261,6 +276,60 @@ def _canonical_action_chunk(
     return actions, target_frames
 
 
+def _canonical_controller_action_chunk(
+    *,
+    controller_actions: np.ndarray,
+    tcp_poses: np.ndarray,
+    frame: int,
+    config: ManiSkillChunkConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    """把实际 controller commands 转为各执行时刻 EEF 中的物理命令。"""
+    # 延迟导入避免 action bridge 的 observation helper 形成模块初始化环。
+    from dev.simulator.maniskill_action_bridge import (
+        canonical_to_controller,
+        controller_to_canonical_unclipped,
+    )
+
+    stop = frame + config.horizon
+    normalized = np.asarray(controller_actions[frame:stop], dtype=np.float32)
+    if normalized.shape != (config.horizon, 7):
+        raise ValueError(f"controller action chunk shape 错误：{normalized.shape}")
+    if not np.isfinite(normalized).all() or np.max(np.abs(normalized)) > 1.0001:
+        raise ValueError("normalized controller action 含非法值")
+    if np.max(np.linalg.norm(normalized[:, 3:6], axis=1)) > 1.0001:
+        raise ValueError("normalized rotation command L2 norm 超过 1")
+    actions = np.stack(
+        [
+            controller_to_canonical_unclipped(
+                normalized[index],
+                tcp_poses[frame + index],
+                position_limit_m=config.position_limit_m,
+                rotation_scale_rad=config.rotation_scale_rad,
+            )
+            for index in range(config.horizon)
+        ]
+    ).astype(np.float32)
+    reconstructed = np.stack(
+        [
+            canonical_to_controller(
+                actions[index],
+                tcp_poses[frame + index],
+                position_limit_m=config.position_limit_m,
+                rotation_scale_rad=config.rotation_scale_rad,
+            ).value
+            for index in range(config.horizon)
+        ]
+    )
+    maximum_error = float(np.max(np.abs(reconstructed - normalized)))
+    if maximum_error > 1e-5:
+        raise ValueError(
+            "controller/canonical command round-trip error="
+            f"{maximum_error:.3e}"
+        )
+    target_frames = np.arange(frame + 1, stop + 1, dtype=np.int32)
+    return actions, target_frames
+
+
 class _ShardWriter:
     def __init__(self, root: Path, split: str, shard_size: int) -> None:
         self.root = root
@@ -339,7 +408,13 @@ def run(
         "representations": {
             "tcp_quaternion": "wxyz (ManiSkill/SAPIEN raw pose)",
             "geometry": "17D query-EEF canonical geometry",
-            "action": "cumulative query-EEF [translation, axis-angle, gripper_open]",
+            "action": (
+                "physical per-step EEF command inverted from executed "
+                "pd_ee_delta_pose actions"
+                if config.action_representation
+                == "canonical_controller_command"
+                else "cumulative query-EEF [translation, axis-angle, gripper_open]"
+            ),
             "pointcloud": "active-object points centered by observed centroid",
         },
         "privileged_supervision": (
@@ -371,9 +446,12 @@ def run(
                 tcp_poses = np.asarray(trajectory["obs/extra/tcp_pose"])
                 goal_positions = np.asarray(trajectory["obs/extra/goal_pos"])
                 qpos = np.asarray(trajectory["obs/agent/qpos"])
+                controller_actions = np.asarray(trajectory["actions"])
                 cube_positions = np.asarray(
                     trajectory["env_states/actors/cube"][:, :3]
                 )
+                if len(controller_actions) != len(tcp_poses) - 1:
+                    raise ValueError(f"{key} controller action/observation 长度不一致")
                 label, label_diagnostic = _infer_active_label(
                     xyzw=xyzw,
                     segmentation=segmentation,
@@ -425,12 +503,25 @@ def run(
                         qpos=qpos,
                         frame=frame,
                     )
-                    actions, target_frames = _canonical_action_chunk(
-                        tcp_poses=tcp_poses,
-                        qpos=qpos,
-                        frame=frame,
-                        config=config,
-                    )
+                    if (
+                        config.action_representation
+                        == "canonical_controller_command"
+                    ):
+                        actions, target_frames = (
+                            _canonical_controller_action_chunk(
+                                controller_actions=controller_actions,
+                                tcp_poses=tcp_poses,
+                                frame=frame,
+                                config=config,
+                            )
+                        )
+                    else:
+                        actions, target_frames = _canonical_action_chunk(
+                            tcp_poses=tcp_poses,
+                            qpos=qpos,
+                            frame=frame,
+                            config=config,
+                        )
                     writers[split].add(
                         {
                             "chunk_id": identifier,

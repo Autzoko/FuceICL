@@ -8,6 +8,7 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
+source /etc/profile
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"

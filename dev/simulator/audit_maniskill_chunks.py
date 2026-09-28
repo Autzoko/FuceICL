@@ -51,6 +51,11 @@ def run(root: Path, output_path: Path) -> None:
     config = summary["config"]
     horizon = int(config["horizon"])
     points_per_object = int(config["points_per_object"])
+    action_representation = config.get(
+        "action_representation", "cumulative_observation_delta"
+    )
+    position_limit_m = float(config.get("position_limit_m", 0.1))
+    rotation_scale_rad = abs(float(config.get("rotation_scale_rad", -0.1)))
 
     split_reports: dict[str, Any] = {}
     split_episodes: dict[str, set[int]] = {}
@@ -111,8 +116,35 @@ def run(root: Path, output_path: Path) -> None:
         if not np.array_equal(arrays["target_frames"], expected_targets):
             raise ValueError(f"{split} target_frames 与 H-step stride=1 不一致")
         gripper = arrays["actions"][..., 6]
-        if gripper.min() < 0.0 or gripper.max() > 1.0:
-            raise ValueError(f"{split} action gripper 超出 [0,1]")
+        if action_representation == "normalized_controller_command":
+            if np.max(np.abs(arrays["actions"])) > 1.0001:
+                raise ValueError(f"{split} normalized controller action 超出 [-1,1]")
+            rotation_command_norm = np.linalg.norm(
+                arrays["actions"][..., 3:6], axis=-1
+            )
+            if np.max(rotation_command_norm) > 1.0001:
+                raise ValueError(f"{split} normalized rotation command L2 norm 超过 1")
+        elif action_representation in (
+            "cumulative_observation_delta",
+            "canonical_controller_command",
+        ):
+            if gripper.min() < 0.0 or gripper.max() > 1.0:
+                raise ValueError(f"{split} action gripper 超出 [0,1]")
+            if action_representation == "canonical_controller_command":
+                translation_norm = np.linalg.norm(
+                    arrays["actions"][..., :3], axis=-1
+                )
+                rotation_norm = np.linalg.norm(
+                    arrays["actions"][..., 3:6], axis=-1
+                )
+                if translation_norm.max() > np.sqrt(3.0) * position_limit_m + 1e-5:
+                    raise ValueError(f"{split} canonical translation command 超限")
+                # XYZ Euler command 经 SO(3) 共轭后存为 axis-angle；小角度下允许
+                # 2% 的参数化差异，但不允许出现控制尺度之外的大旋转。
+                if rotation_norm.max() > 1.02 * rotation_scale_rad + 1e-5:
+                    raise ValueError(f"{split} canonical rotation command 超限")
+        else:
+            raise ValueError(f"未知 action representation：{action_representation}")
         geometry_gripper = arrays["geometry"][:, 15]
         target_valid = arrays["geometry"][:, 16]
         if geometry_gripper.min() < 0.0 or geometry_gripper.max() > 1.0:
@@ -125,6 +157,27 @@ def run(root: Path, output_path: Path) -> None:
         sampled_centers = np.linalg.norm(
             arrays["active_points"].mean(axis=1), axis=-1
         )
+        action_stats = {
+            (
+                "translation_norm_normalized"
+                if action_representation == "normalized_controller_command"
+                else "translation_norm_m"
+            ): _stats(translation),
+            (
+                "rotation_norm_normalized"
+                if action_representation == "normalized_controller_command"
+                else "rotation_norm_rad"
+            ): _stats(rotation),
+            (
+                "action_gripper_normalized"
+                if action_representation == "normalized_controller_command"
+                else "gripper_open"
+            ): {
+                "min": float(gripper.min()),
+                "max": float(gripper.max()),
+                "mean": float(gripper.mean()),
+            },
+        }
         split_reports[split] = {
             "chunks": len(records),
             "episodes": len(split_episodes[split]),
@@ -134,13 +187,7 @@ def run(root: Path, output_path: Path) -> None:
             "geometry_dtype": str(arrays["geometry"].dtype),
             "actions_dtype": str(arrays["actions"].dtype),
             "sampled_point_center_norm_m": _stats(sampled_centers),
-            "translation_norm_m": _stats(translation),
-            "rotation_norm_rad": _stats(rotation),
-            "gripper_open": {
-                "min": float(gripper.min()),
-                "max": float(gripper.max()),
-                "mean": float(gripper.mean()),
-            },
+            **action_stats,
             "geometry_abs_max": float(np.abs(arrays["geometry"]).max()),
         }
 
@@ -155,6 +202,7 @@ def run(root: Path, output_path: Path) -> None:
         "source_h5_sha256": summary["source"]["h5_sha256"],
         "array_allowlist": sorted(EXPECTED_ARRAYS),
         "privileged_state_in_shards": False,
+        "action_representation": action_representation,
         "episode_overlap": [],
         "splits": split_reports,
     }
