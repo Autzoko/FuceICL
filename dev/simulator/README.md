@@ -25,3 +25,14 @@ sbatch src/scripts/hpc/smoke_maniskill.slurm \
   "$PWD" \
   /scratch/ll5582/data/ManiSkill3/evaluation/smoke_pick_cube_pointcloud_v1.json
 ```
+
+通过 smoke 后，先把 PickCube 的 RL `pd_ee_delta_pose` HDF5/JSON 解压到独立 pilot 目录，
+再用官方工具按 environment states 重放 32 条，补齐 pointcloud observations。输出文件名由
+ManiSkill 固定为 `trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.{h5,json}`，脚本禁止覆盖：
+
+```bash
+sbatch src/scripts/hpc/replay_maniskill_pointcloud.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.h5 \
+  32
+```
