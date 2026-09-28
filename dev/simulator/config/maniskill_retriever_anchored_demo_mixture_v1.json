@@ -1,0 +1,21 @@
+{
+  "schema_version": "maniskill-retriever-anchored-demo-mixture-v1",
+  "seed": 20261002,
+  "source_checkpoint_sha256": "015d57a36f57f65ae310376badd3781621efa402d90f9b378b1cd75375e2b143",
+  "operator_train_episodes": [
+    0, 1, 2, 3, 4, 5, 6, 7, 12, 14,
+    15, 16, 17, 18, 19, 20, 21, 24, 25, 26
+  ],
+  "mixture_train_episodes": [28, 29, 30, 31],
+  "validation_episodes": [8, 9, 10, 11, 13, 22, 23, 27],
+  "candidate_count": 4,
+  "epochs": 60,
+  "batch_size": 128,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "hidden_dim": 32,
+  "maximum_odds_distortion": 4.0,
+  "gradient_clip_norm": 1.0,
+  "bootstrap_resamples": 10000,
+  "latency_iterations": 200
+}
