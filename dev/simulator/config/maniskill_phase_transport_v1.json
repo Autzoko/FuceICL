@@ -1,0 +1,6 @@
+{
+  "schema_version": "maniskill-phase-transport-v1",
+  "seed": 20260928,
+  "ridge_lambda": 0.001,
+  "bootstrap_resamples": 5000
+}
