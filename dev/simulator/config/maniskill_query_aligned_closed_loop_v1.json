@@ -1,0 +1,31 @@
+{
+  "schema_version": "maniskill-query-aligned-closed-loop-v1",
+  "seed_generation_seed": 20260929,
+  "seeds": [
+    292998570, 415223522, 577192347, 806249560, 881441050,
+    783919980, 180979506, 100788075, 585460840, 299319560,
+    426766149, 690527740, 346764929, 717177130, 724376935,
+    619343080, 387627596, 213013673, 563617697, 684675476
+  ],
+  "prior_evaluation_seeds": [
+    314159265, 271828182, 161803398, 141421356, 173205080,
+    223606797, 244948974, 264575131, 316227766, 331662479,
+    346410161, 360555127, 374165738, 387298334, 412310562,
+    424264068, 435889894, 447213595, 458257569, 469041575
+  ],
+  "policies": [
+    "phase_matched_copy_h6",
+    "phase_factorized_transport_h6",
+    "fixed_low_rank_transport_h6",
+    "query_aligned_transport_h6",
+    "bcsg_h6"
+  ],
+  "max_episode_steps": 100,
+  "execution_horizon": 6,
+  "minimum_label_points": 8,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "phase_ridge_lambda": 0.001,
+  "bootstrap_resamples": 10000,
+  "stop_on_truncation": false
+}
