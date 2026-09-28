@@ -133,14 +133,22 @@ def _seed_everything(seed: int) -> None:
 
 def _normalize_actions(actions: torch.Tensor) -> torch.Tensor:
     normalized = actions.clone().float()
-    normalized[..., :6] /= POSE_SCALES
+    pose_scales = POSE_SCALES.to(
+        device=normalized.device,
+        dtype=normalized.dtype,
+    )
+    normalized[..., :6] /= pose_scales
     normalized[..., 6] = 2.0 * normalized[..., 6] - 1.0
     return normalized
 
 
 def _denormalize_actions(actions: torch.Tensor) -> torch.Tensor:
     physical = actions.clone().float()
-    physical[..., :6] *= POSE_SCALES
+    pose_scales = POSE_SCALES.to(
+        device=physical.device,
+        dtype=physical.dtype,
+    )
+    physical[..., :6] *= pose_scales
     physical[..., 6] = ((physical[..., 6] + 1.0) * 0.5).clamp(0.0, 1.0)
     return physical
 
