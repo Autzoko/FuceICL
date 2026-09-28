@@ -71,13 +71,20 @@ from dev.simulator.preprocess_maniskill_chunks import (
 )
 
 
-POLICIES = (
+LEGACY_POLICIES = (
     "phase_matched_copy_h6",
     "phase_factorized_transport_h6",
     "fixed_low_rank_transport_h6",
     "query_aligned_transport_h6",
     "bcsg_h6",
 )
+CONFORMAL_POLICIES = (
+    "phase_matched_copy_h6",
+    "bcsg_h6",
+    "codra_h6",
+    "rscc_h6",
+)
+POLICIES = LEGACY_POLICIES
 
 
 @dataclass(frozen=True)
@@ -97,6 +104,8 @@ class ClosedLoopConfig:
     phase_ridge_lambda: float
     bootstrap_resamples: int
     stop_on_truncation: bool
+    calibration_report_sha256: str | None = None
+    conformal_alpha: float | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "ClosedLoopConfig":
@@ -109,8 +118,19 @@ class ClosedLoopConfig:
             raise ValueError("closed-loop seeds 必须非空且唯一")
         if set(self.seeds) & set(self.prior_evaluation_seeds):
             raise ValueError("closed-loop seeds 与先前评估重叠")
-        if tuple(self.policies) != POLICIES:
-            raise ValueError("本实验要求冻结的五个策略及顺序")
+        expected_policies = {
+            "maniskill-query-aligned-closed-loop-v1": LEGACY_POLICIES,
+            "maniskill-rscc-closed-loop-v1": CONFORMAL_POLICIES,
+        }.get(self.schema_version)
+        if expected_policies is None:
+            raise ValueError(f"未知 closed-loop schema：{self.schema_version}")
+        if tuple(self.policies) != expected_policies:
+            raise ValueError("closed-loop 策略及顺序与 schema 不一致")
+        if self.schema_version == "maniskill-rscc-closed-loop-v1":
+            if not self.calibration_report_sha256:
+                raise ValueError("RSCC 必须冻结 calibration report SHA256")
+            if self.conformal_alpha != 0.1:
+                raise ValueError("RSCC v1 冻结 conformal alpha=0.1")
         positive = (
             self.max_episode_steps,
             self.execution_horizon,
@@ -122,6 +142,51 @@ class ClosedLoopConfig:
         )
         if min(positive) <= 0:
             raise ValueError("closed-loop 正数配置非法")
+
+
+def _load_acceptance_thresholds(
+    *,
+    report_path: Path | None,
+    task_id: str,
+    checkpoint_path: Path,
+    config: ClosedLoopConfig,
+) -> tuple[dict[str, float] | None, dict[str, Any] | None]:
+    """校验离线 calibration provenance 并读取冻结阈值。"""
+    if config.schema_version != "maniskill-rscc-closed-loop-v1":
+        if report_path is not None:
+            raise ValueError("legacy closed-loop 不接受 calibration report")
+        return None, None
+    if report_path is None:
+        raise ValueError("RSCC closed-loop 缺少 calibration report")
+    report_sha256 = _sha256(report_path)
+    if report_sha256 != config.calibration_report_sha256:
+        raise ValueError("calibration report SHA256 与冻结配置不匹配")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if report.get("checkpoint_sha256") != _sha256(checkpoint_path):
+        raise ValueError("calibration report 与 closed-loop checkpoint 不匹配")
+    if float(report.get("protocol", {}).get("crc_alpha", -1.0)) != float(
+        config.conformal_alpha
+    ):
+        raise ValueError("calibration alpha 与冻结配置不匹配")
+    task = report.get("per_task", {}).get(task_id)
+    if task is None:
+        raise ValueError(f"calibration report 缺少任务：{task_id}")
+    calibrations = task["calibrations"]
+    thresholds = {
+        "distance": float(calibrations["distance"]["threshold"]),
+        "codra": float(calibrations["codra"]["threshold"]),
+    }
+    if not all(math.isfinite(value) for value in thresholds.values()):
+        raise ValueError("calibration threshold 含非有限值")
+    provenance = {
+        "path": str(report_path),
+        "sha256": report_sha256,
+        "checkpoint_sha256": report["checkpoint_sha256"],
+        "alpha": config.conformal_alpha,
+        "episodes": int(calibrations["distance"]["episodes"]),
+        "thresholds": thresholds,
+    }
+    return thresholds, provenance
 
 
 @dataclass(frozen=True)
@@ -457,6 +522,7 @@ def _plan_chunk(
     models: FrozenModels,
     pose_scales: torch.Tensor,
     execution_horizon: int,
+    acceptance_thresholds: Mapping[str, float] | None,
     device: torch.device,
 ) -> tuple[np.ndarray, int | None, float | None, bool, dict[str, Any]]:
     if context.geometry is None:
@@ -524,7 +590,12 @@ def _plan_chunk(
                 (prediction[..., :3].abs() > 1.0).sum()
             ),
         }
-    elif policy in {"query_aligned_transport_h6", "bcsg_h6"}:
+    elif policy in {
+        "query_aligned_transport_h6",
+        "bcsg_h6",
+        "codra_h6",
+        "rscc_h6",
+    }:
         mask = torch.ones(
             demo_actions.shape[:2],
             dtype=torch.bool,
@@ -541,6 +612,11 @@ def _plan_chunk(
             )
             prediction = transported
             gate_value = None
+            executed_gate = None
+            accepted = None
+            acceptance_score = None
+            acceptance_threshold = None
+            rejection_error = None
         else:
             transported, features = frozen_transport_features(
                 models.transport,
@@ -550,13 +626,40 @@ def _plan_chunk(
                 mask,
             )
             gate = models.gate(features)
+            residual = torch.linalg.vector_norm(
+                transported[..., :3] - demo_actions[..., :3],
+                dim=-1,
+            ).mean(dim=1)
+            gate_value = float(gate[0])
+            accepted = True
+            acceptance_score = None
+            acceptance_threshold = None
+            if policy in {"codra_h6", "rscc_h6"}:
+                if acceptance_thresholds is None:
+                    raise ValueError(f"{policy} 缺少冻结 acceptance thresholds")
+                if policy == "codra_h6":
+                    score = distances[selected] * gate[0] * residual[0]
+                    acceptance_threshold = float(acceptance_thresholds["codra"])
+                else:
+                    score = distances[selected]
+                    acceptance_threshold = float(
+                        acceptance_thresholds["distance"]
+                    )
+                acceptance_score = float(score)
+                accepted = acceptance_score <= acceptance_threshold
+            effective_gate = gate if accepted else torch.zeros_like(gate)
             prediction = apply_shrinkage(
                 demo_actions,
                 transported,
-                gate,
+                effective_gate,
                 mask,
             )
-            gate_value = float(gate[0])
+            executed_gate = float(effective_gate[0])
+            rejection_error = (
+                None
+                if accepted
+                else float((prediction - demo_actions).abs().max())
+            )
         _sync(device)
         diagnostics = {
             "predictor_latency_ms": (
@@ -564,6 +667,11 @@ def _plan_chunk(
             )
             * 1000.0,
             "predicted_gate": gate_value,
+            "executed_gate": executed_gate,
+            "residual_accepted": accepted,
+            "acceptance_score": acceptance_score,
+            "acceptance_threshold": acceptance_threshold,
+            "rejected_prediction_max_abs_error_from_copy": rejection_error,
             "normalized_translation_residual_l2_mean": float(
                 torch.linalg.vector_norm(
                     transported[..., :3] - demo_actions[..., :3],
@@ -582,6 +690,8 @@ def _plan_chunk(
 
 def _policy_diagnostics(
     records: Sequence[Mapping[str, Any]],
+    *,
+    max_episode_steps: int,
 ) -> dict[str, Any]:
     replans = [
         step
@@ -604,10 +714,61 @@ def _policy_diagnostics(
         for step in replans
         if step.get("normalized_translation_residual_l2_mean") is not None
     ]
+    accepted_steps = [
+        step for step in replans if step.get("residual_accepted") is not None
+    ]
+    acceptance_by_time_quartile = []
+    for quartile in range(4):
+        values = [
+            bool(step["residual_accepted"])
+            for step in accepted_steps
+            if min(
+                3,
+                (int(step["step"]) - 1) * 4 // max_episode_steps,
+            )
+            == quartile
+        ]
+        acceptance_by_time_quartile.append(
+            {
+                "quartile": quartile,
+                "replans": len(values),
+                "acceptance": (
+                    None if not values else float(np.mean(values))
+                ),
+            }
+        )
+    rejection_errors = [
+        float(step["rejected_prediction_max_abs_error_from_copy"])
+        for step in replans
+        if step.get("rejected_prediction_max_abs_error_from_copy") is not None
+    ]
     return {
         "predictor_latency_ms": _stats(predictor_latencies),
         "predicted_gate": _stats(gates),
         "normalized_translation_residual_l2_mean": _stats(residuals),
+        "residual_acceptance": (
+            None
+            if not accepted_steps
+            else {
+                "accepted": sum(
+                    bool(step["residual_accepted"])
+                    for step in accepted_steps
+                ),
+                "replans": len(accepted_steps),
+                "rate": float(
+                    np.mean(
+                        [
+                            bool(step["residual_accepted"])
+                            for step in accepted_steps
+                        ]
+                    )
+                ),
+                "by_time_quartile": acceptance_by_time_quartile,
+            }
+        ),
+        "rejected_prediction_max_abs_error_from_copy": (
+            None if not rejection_errors else max(rejection_errors)
+        ),
         "translation_components_outside_normalized_range": sum(
             int(step.get("translation_components_outside_normalized_range", 0))
             for step in replans
@@ -622,6 +783,7 @@ def run(
     data_root: Path,
     source_metadata_path: Path,
     checkpoint_path: Path,
+    calibration_report_path: Path | None,
     config_path: Path,
     output_path: Path,
     config: ClosedLoopConfig,
@@ -633,6 +795,14 @@ def run(
     overlap = source_seeds & set(config.seeds)
     if overlap:
         raise ValueError(f"closed-loop seeds 与 replay 重叠：{sorted(overlap)}")
+    acceptance_thresholds, calibration_provenance = (
+        _load_acceptance_thresholds(
+            report_path=calibration_report_path,
+            task_id=task_id,
+            checkpoint_path=checkpoint_path,
+            config=config,
+        )
+    )
     data_hash = _sha256(data_root / "summary.json")
     summary = json.loads((data_root / "summary.json").read_text(encoding="utf-8"))
     stored_task = str(summary.get("config", {}).get("task_id", ""))
@@ -784,6 +954,7 @@ def run(
                             models=models,
                             pose_scales=pose_scales,
                             execution_horizon=config.execution_horizon,
+                            acceptance_thresholds=acceptance_thresholds,
                             device=device,
                         )
                         buffered_actions = [token for token in plan]
@@ -852,6 +1023,33 @@ def run(
                         ),
                         "predicted_gate": (
                             buffered_diagnostics.get("predicted_gate")
+                            if replanned
+                            else None
+                        ),
+                        "executed_gate": (
+                            buffered_diagnostics.get("executed_gate")
+                            if replanned
+                            else None
+                        ),
+                        "residual_accepted": (
+                            buffered_diagnostics.get("residual_accepted")
+                            if replanned
+                            else None
+                        ),
+                        "acceptance_score": (
+                            buffered_diagnostics.get("acceptance_score")
+                            if replanned
+                            else None
+                        ),
+                        "acceptance_threshold": (
+                            buffered_diagnostics.get("acceptance_threshold")
+                            if replanned
+                            else None
+                        ),
+                        "rejected_prediction_max_abs_error_from_copy": (
+                            buffered_diagnostics.get(
+                                "rejected_prediction_max_abs_error_from_copy"
+                            )
                             if replanned
                             else None
                         ),
@@ -967,22 +1165,35 @@ def run(
         for policy in config.policies
     }
     diagnostics = {
-        policy: _policy_diagnostics(rollouts[policy])
+        policy: _policy_diagnostics(
+            rollouts[policy],
+            max_episode_steps=config.max_episode_steps,
+        )
         for policy in config.policies
     }
     success_vectors = {
         policy: _success_vector(rollouts[policy], config.seeds)
         for policy in config.policies
     }
-    pairs = (
-        ("phase_matched_copy_h6", "phase_factorized_transport_h6"),
-        ("phase_matched_copy_h6", "fixed_low_rank_transport_h6"),
-        ("phase_matched_copy_h6", "query_aligned_transport_h6"),
-        ("phase_matched_copy_h6", "bcsg_h6"),
-        ("fixed_low_rank_transport_h6", "bcsg_h6"),
-        ("query_aligned_transport_h6", "bcsg_h6"),
-        ("phase_factorized_transport_h6", "bcsg_h6"),
-    )
+    if tuple(config.policies) == CONFORMAL_POLICIES:
+        pairs = (
+            ("phase_matched_copy_h6", "bcsg_h6"),
+            ("phase_matched_copy_h6", "codra_h6"),
+            ("phase_matched_copy_h6", "rscc_h6"),
+            ("bcsg_h6", "codra_h6"),
+            ("bcsg_h6", "rscc_h6"),
+            ("codra_h6", "rscc_h6"),
+        )
+    else:
+        pairs = (
+            ("phase_matched_copy_h6", "phase_factorized_transport_h6"),
+            ("phase_matched_copy_h6", "fixed_low_rank_transport_h6"),
+            ("phase_matched_copy_h6", "query_aligned_transport_h6"),
+            ("phase_matched_copy_h6", "bcsg_h6"),
+            ("fixed_low_rank_transport_h6", "bcsg_h6"),
+            ("query_aligned_transport_h6", "bcsg_h6"),
+            ("phase_factorized_transport_h6", "bcsg_h6"),
+        )
     comparisons = {
         f"{candidate}_minus_{reference}": _paired_bootstrap(
             success_vectors[reference],
@@ -1004,7 +1215,11 @@ def run(
                 "checkpoint operator bank; same phase; bank-standardized 17D top-1"
             ),
             "execution": "H=6 open-loop chunk with observation/retrieval every 6 steps",
-            "predictor": "strict Demo-residual QA-LRDT with optional BCSG",
+            "predictor": (
+                "strict Demo-residual QA-LRDT with BCSG and conformal support"
+                if acceptance_thresholds is not None
+                else "strict Demo-residual QA-LRDT with optional BCSG"
+            ),
             "seed_unit": "paired policy reset on identical task seed",
         },
         "task": task_id,
@@ -1028,6 +1243,7 @@ def run(
         "source_metadata_sha256": _sha256(source_metadata_path),
         "checkpoint_sha256": _sha256(checkpoint_path),
         "checkpoint_git_commit": models.checkpoint.get("git_commit"),
+        "calibration": calibration_provenance,
         "bank": {
             "chunks": len(bank_records),
             "chunk_ids_match_checkpoint": True,
@@ -1072,6 +1288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--source-metadata", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--calibration-report", type=Path)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
@@ -1089,6 +1306,11 @@ def main() -> None:
         data_root=arguments.data_root.resolve(),
         source_metadata_path=arguments.source_metadata.resolve(),
         checkpoint_path=arguments.checkpoint.resolve(),
+        calibration_report_path=(
+            None
+            if arguments.calibration_report is None
+            else arguments.calibration_report.resolve()
+        ),
         config_path=arguments.config.resolve(),
         output_path=arguments.output.resolve(),
         config=ClosedLoopConfig.from_json(arguments.config.resolve()),
