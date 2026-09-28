@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=maniskill-radm-cl
-#SBATCH --partition=nvidia
-#SBATCH --gres=gpu:v100:1
+#SBATCH --partition=visual
+#SBATCH --gres=gpu:p4000:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --time=01:30:00
+#SBATCH --time=00:15:00
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
