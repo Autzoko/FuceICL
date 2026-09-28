@@ -34,6 +34,13 @@ from dev.predictor.query_aligned_transport import (
     QueryAlignedLowRankDemoTransport,
     QueryAlignedTransportConfig,
 )
+from dev.predictor.retriever_anchored_demo_mixture import (
+    CANDIDATE_FEATURE_DIM,
+    RetrieverAnchoredDemoMixture,
+    RetrieverAnchoredMixtureConfig,
+    mix_demo_hypotheses,
+    retrieval_prior,
+)
 from dev.predictor.train_action_chunks import _denormalize_actions
 from dev.simulator.evaluate_maniskill_closed_loop import (
     _active_label,
@@ -69,6 +76,9 @@ from dev.simulator.preprocess_maniskill_chunks import (
     _gripper_open,
     _segmented_points,
 )
+from dev.simulator.train_retriever_anchored_demo_mixture import (
+    _candidate_disagreement,
+)
 
 
 LEGACY_POLICIES = (
@@ -83,6 +93,11 @@ CONFORMAL_POLICIES = (
     "bcsg_h6",
     "codra_h6",
     "rscc_h6",
+)
+RADM_POLICIES = (
+    "bcsg_h6",
+    "retriever_prior_mixture_h6",
+    "radm_h6",
 )
 POLICIES = LEGACY_POLICIES
 
@@ -106,6 +121,8 @@ class ClosedLoopConfig:
     stop_on_truncation: bool
     calibration_report_sha256: str | None = None
     conformal_alpha: float | None = None
+    source_checkpoint_sha256: str | None = None
+    radm_checkpoint_sha256: str | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "ClosedLoopConfig":
@@ -121,6 +138,7 @@ class ClosedLoopConfig:
         expected_policies = {
             "maniskill-query-aligned-closed-loop-v1": LEGACY_POLICIES,
             "maniskill-rscc-closed-loop-v1": CONFORMAL_POLICIES,
+            "maniskill-radm-closed-loop-v1": RADM_POLICIES,
         }.get(self.schema_version)
         if expected_policies is None:
             raise ValueError(f"未知 closed-loop schema：{self.schema_version}")
@@ -131,6 +149,15 @@ class ClosedLoopConfig:
                 raise ValueError("RSCC 必须冻结 calibration report SHA256")
             if self.conformal_alpha != 0.1:
                 raise ValueError("RSCC v1 冻结 conformal alpha=0.1")
+        if self.schema_version == "maniskill-radm-closed-loop-v1":
+            hashes = (
+                self.source_checkpoint_sha256,
+                self.radm_checkpoint_sha256,
+            )
+            if any(value is None or len(value) != 64 for value in hashes):
+                raise ValueError(
+                    "RADM closed-loop 必须冻结两个 checkpoint SHA256"
+                )
         positive = (
             self.max_episode_steps,
             self.execution_horizon,
@@ -209,6 +236,7 @@ class FrozenModels:
     fixed_transport: LowRankDemoActionTransport
     transport: QueryAlignedLowRankDemoTransport
     gate: BenefitCalibratedGate
+    radm: RetrieverAnchoredDemoMixture | None
     checkpoint: dict[str, Any]
 
 
@@ -315,6 +343,7 @@ def _initial_signature(context: RuntimeContext) -> np.ndarray:
 def _load_models(
     checkpoint_path: Path,
     *,
+    radm_checkpoint_path: Path | None,
     task_id: str,
     data_summary_sha256: str,
     pose_scales: torch.Tensor,
@@ -356,10 +385,21 @@ def _load_models(
         BenefitGateConfig(**checkpoint["gate_config"])
     )
     gate.load_state_dict(checkpoint["gate"])
+    radm = None
+    if radm_checkpoint_path is not None:
+        payload = torch.load(radm_checkpoint_path, map_location="cpu")
+        if payload.get("source_checkpoint_sha256") != _sha256(checkpoint_path):
+            raise ValueError("RADM checkpoint 与 source checkpoint 不匹配")
+        radm = RetrieverAnchoredDemoMixture(
+            RetrieverAnchoredMixtureConfig(**payload["config"])
+        )
+        radm.load_state_dict(payload["model"])
+        radm = radm.to(device).eval()
     return FrozenModels(
         fixed_transport=fixed_transport.to(device).eval(),
         transport=transport.to(device).eval(),
         gate=gate.to(device).eval(),
+        radm=radm,
         checkpoint=checkpoint,
     )
 
@@ -476,7 +516,7 @@ def _structural_audit(
         zero_actions,
         zero_mask,
     )
-    return {
+    result = {
         "fixed_identity_exact": bool(torch.equal(fixed_identity, demo_actions)),
         "fixed_no_demo_exact": bool(torch.equal(fixed_no_demo, zero_actions)),
         "identity_exact": bool(torch.equal(identity, demo_actions)),
@@ -506,6 +546,70 @@ def _structural_audit(
         ),
         "gate_feature_dim": int(features.shape[1]),
     }
+    if models.radm is not None:
+        candidate_count = 4
+        candidate_features = torch.zeros(
+            (1, candidate_count, CANDIDATE_FEATURE_DIM),
+            device=device,
+        )
+        prior = torch.zeros((1, candidate_count), device=device)
+        candidate_mask = torch.zeros(
+            (1, candidate_count),
+            dtype=torch.bool,
+            device=device,
+        )
+        weights = models.radm(candidate_features, prior, candidate_mask)
+        hypotheses = torch.zeros(
+            (1, candidate_count, actions.shape[1], actions.shape[2]),
+            device=device,
+        )
+        no_demo_radm = mix_demo_hypotheses(
+            hypotheses,
+            weights,
+            candidate_mask,
+        )
+        result.update(
+            {
+                "radm_no_demo_exact": bool(
+                    torch.equal(no_demo_radm, torch.zeros_like(no_demo_radm))
+                ),
+                "radm_parameters": sum(
+                    value.numel() for value in models.radm.parameters()
+                ),
+                "radm_maximum_odds_distortion": (
+                    models.radm.config.maximum_odds_distortion
+                ),
+            }
+        )
+    return result
+
+
+def _distinct_phase_top_k(
+    *,
+    distances: torch.Tensor,
+    bank_phase: torch.Tensor,
+    query_phase: torch.Tensor,
+    bank_episodes: torch.Tensor,
+    candidate_count: int,
+) -> torch.Tensor:
+    """按距离取同 phase 且来自不同 bank episodes 的候选。"""
+    valid = bank_phase == query_phase.reshape(())
+    ranked = torch.argsort(distances.masked_fill(~valid, torch.inf))
+    selected = []
+    seen_episodes: set[int] = set()
+    for index in ranked.tolist():
+        if not bool(valid[index]):
+            break
+        episode = int(bank_episodes[index])
+        if episode in seen_episodes:
+            continue
+        seen_episodes.add(episode)
+        selected.append(index)
+        if len(selected) == candidate_count:
+            break
+    if len(selected) != candidate_count:
+        raise ValueError("当前观测没有 K 个跨 episode 同 phase candidates")
+    return torch.tensor(selected, dtype=torch.long, device=distances.device)
 
 
 @torch.inference_mode()
@@ -516,6 +620,7 @@ def _plan_chunk(
     bank_geometry: torch.Tensor,
     bank_actions: torch.Tensor,
     bank_phase: torch.Tensor,
+    bank_episodes: torch.Tensor,
     retrieval_mean: torch.Tensor,
     retrieval_std: torch.Tensor,
     phase_weights: torch.Tensor,
@@ -544,10 +649,7 @@ def _plan_chunk(
         )[0]
     )
     demo_geometry = bank_geometry[selected : selected + 1]
-    demo_actions = bank_actions[
-        selected : selected + 1,
-        :execution_horizon,
-    ]
+    demo_actions = bank_actions[selected : selected + 1, :execution_horizon]
     diagnostics: dict[str, Any] = {}
     if policy == "phase_matched_copy_h6":
         prediction = demo_actions
@@ -682,6 +784,116 @@ def _plan_chunk(
                 (prediction[..., :3].abs() > 1.0).sum()
             ),
         }
+    elif policy in {"retriever_prior_mixture_h6", "radm_h6"}:
+        candidate_indices = _distinct_phase_top_k(
+            distances=distances,
+            bank_phase=bank_phase,
+            query_phase=query_phase,
+            bank_episodes=bank_episodes,
+            candidate_count=4,
+        )
+        candidate_geometry = bank_geometry[candidate_indices]
+        candidate_actions = bank_actions[
+            candidate_indices,
+            :execution_horizon,
+        ]
+        query_batch = query[None].expand(len(candidate_indices), -1)
+        action_mask = torch.ones(
+            candidate_actions.shape[:2],
+            dtype=torch.bool,
+            device=device,
+        )
+        _sync(device)
+        predictor_started = time.perf_counter()
+        transported, features = frozen_transport_features(
+            models.transport,
+            query_batch,
+            candidate_geometry,
+            candidate_actions,
+            action_mask,
+        )
+        gates = models.gate(features)
+        hypotheses = apply_shrinkage(
+            candidate_actions,
+            transported,
+            gates,
+            action_mask,
+        )[None]
+        candidate_distances = distances[candidate_indices][None]
+        candidate_mask = torch.ones(
+            (1, len(candidate_indices)),
+            dtype=torch.bool,
+            device=device,
+        )
+        prior = retrieval_prior(candidate_distances, candidate_mask)
+        disagreement = _candidate_disagreement(hypotheses)
+        candidate_features = torch.cat(
+            (
+                features[None],
+                candidate_distances[..., None],
+                disagreement[..., None],
+            ),
+            dim=-1,
+        )
+        if policy == "radm_h6":
+            if models.radm is None:
+                raise ValueError("radm_h6 缺少冻结 RADM checkpoint")
+            posterior = models.radm(candidate_features, prior, candidate_mask)
+        else:
+            posterior = prior
+        prediction = mix_demo_hypotheses(
+            hypotheses,
+            posterior,
+            candidate_mask,
+        )
+        _sync(device)
+        odds = (posterior[:, :, None] / posterior[:, None, :]) / (
+            prior[:, :, None] / prior[:, None, :]
+        )
+        candidate_translation = hypotheses[..., :3]
+        action_span = torch.linalg.vector_norm(
+            candidate_translation[:, :, None]
+            - candidate_translation[:, None, :],
+            dim=-1,
+        )
+        convex_violation = max(
+            float(
+                (candidate_translation.amin(dim=1) - prediction[..., :3])
+                .clamp_min(0)
+                .max()
+            ),
+            float(
+                (prediction[..., :3] - candidate_translation.amax(dim=1))
+                .clamp_min(0)
+                .max()
+            ),
+        )
+        discrete_error = float(
+            (prediction[..., 3:] - hypotheses[:, 0, :, 3:]).abs().max()
+        )
+        diagnostics = {
+            "predictor_latency_ms": (
+                time.perf_counter() - predictor_started
+            )
+            * 1000.0,
+            "candidate_indices": candidate_indices.cpu().tolist(),
+            "candidate_distances": candidate_distances[0].cpu().tolist(),
+            "mixture_prior": prior[0].cpu().tolist(),
+            "mixture_posterior": posterior[0].cpu().tolist(),
+            "maximum_odds_distortion": float(odds.max()),
+            "normalized_action_span_diameter": float(action_span.max()),
+            "translation_convex_hull_max_violation": convex_violation,
+            "discrete_prior_max_abs_error": discrete_error,
+            "normalized_translation_residual_l2_mean": float(
+                torch.linalg.vector_norm(
+                    prediction[..., :3] - candidate_actions[:1, :, :3],
+                    dim=-1,
+                ).mean()
+            ),
+            "translation_components_outside_normalized_range": int(
+                (prediction[..., :3].abs() > 1.0).sum()
+            ),
+        }
     else:
         raise ValueError(f"未知 closed-loop policy：{policy}")
     canonical = _denormalize_actions(prediction, pose_scales)[0].cpu().numpy()
@@ -742,6 +954,35 @@ def _policy_diagnostics(
         for step in replans
         if step.get("rejected_prediction_max_abs_error_from_copy") is not None
     ]
+    odds_distortions = [
+        float(step["maximum_odds_distortion"])
+        for step in replans
+        if step.get("maximum_odds_distortion") is not None
+    ]
+    action_spans = [
+        float(step["normalized_action_span_diameter"])
+        for step in replans
+        if step.get("normalized_action_span_diameter") is not None
+    ]
+    posterior_entropies = []
+    for step in replans:
+        weights = step.get("mixture_posterior")
+        if weights is None:
+            continue
+        values = np.asarray(weights, dtype=np.float64)
+        posterior_entropies.append(
+            float(-(values * np.log(np.clip(values, 1e-12, None))).sum())
+        )
+    convex_violations = [
+        float(step["translation_convex_hull_max_violation"])
+        for step in replans
+        if step.get("translation_convex_hull_max_violation") is not None
+    ]
+    discrete_errors = [
+        float(step["discrete_prior_max_abs_error"])
+        for step in replans
+        if step.get("discrete_prior_max_abs_error") is not None
+    ]
     return {
         "predictor_latency_ms": _stats(predictor_latencies),
         "predicted_gate": _stats(gates),
@@ -769,6 +1010,15 @@ def _policy_diagnostics(
         "rejected_prediction_max_abs_error_from_copy": (
             None if not rejection_errors else max(rejection_errors)
         ),
+        "maximum_odds_distortion": _stats(odds_distortions),
+        "normalized_action_span_diameter": _stats(action_spans),
+        "mixture_posterior_entropy": _stats(posterior_entropies),
+        "translation_convex_hull_max_violation": (
+            None if not convex_violations else max(convex_violations)
+        ),
+        "discrete_prior_max_abs_error": (
+            None if not discrete_errors else max(discrete_errors)
+        ),
         "translation_components_outside_normalized_range": sum(
             int(step.get("translation_components_outside_normalized_range", 0))
             for step in replans
@@ -783,6 +1033,7 @@ def run(
     data_root: Path,
     source_metadata_path: Path,
     checkpoint_path: Path,
+    radm_checkpoint_path: Path | None,
     calibration_report_path: Path | None,
     config_path: Path,
     output_path: Path,
@@ -795,6 +1046,15 @@ def run(
     overlap = source_seeds & set(config.seeds)
     if overlap:
         raise ValueError(f"closed-loop seeds 与 replay 重叠：{sorted(overlap)}")
+    is_radm_protocol = config.schema_version == "maniskill-radm-closed-loop-v1"
+    if is_radm_protocol != (radm_checkpoint_path is not None):
+        raise ValueError("RADM schema 与 --radm-checkpoint 必须同时出现")
+    if is_radm_protocol:
+        assert radm_checkpoint_path is not None
+        if _sha256(checkpoint_path) != config.source_checkpoint_sha256:
+            raise ValueError("RADM closed-loop source checkpoint SHA256 不匹配")
+        if _sha256(radm_checkpoint_path) != config.radm_checkpoint_sha256:
+            raise ValueError("RADM closed-loop checkpoint SHA256 不匹配")
     acceptance_thresholds, calibration_provenance = (
         _load_acceptance_thresholds(
             report_path=calibration_report_path,
@@ -816,6 +1076,7 @@ def run(
     )
     models = _load_models(
         checkpoint_path,
+        radm_checkpoint_path=radm_checkpoint_path,
         task_id=task_id,
         data_summary_sha256=data_hash,
         pose_scales=pose_scales,
@@ -865,6 +1126,11 @@ def run(
     bank_geometry = bank_geometry_cpu.to(device)
     bank_actions = bank_actions_cpu.to(device)
     bank_phase = phase_ids(bank_geometry_cpu).to(device)
+    bank_episodes = torch.tensor(
+        [int(record["episode"]) for record in bank_records],
+        dtype=torch.long,
+        device=device,
+    )
     retrieval_mean = retrieval_mean_cpu.to(device)
     retrieval_std = retrieval_std_cpu.to(device)
     phase_weights = phase_weights_cpu.to(device)
@@ -948,6 +1214,7 @@ def run(
                             bank_geometry=bank_geometry,
                             bank_actions=bank_actions,
                             bank_phase=bank_phase,
+                            bank_episodes=bank_episodes,
                             retrieval_mean=retrieval_mean,
                             retrieval_std=retrieval_std,
                             phase_weights=phase_weights,
@@ -982,6 +1249,65 @@ def run(
                             else str(bank_records[buffered_index]["chunk_id"])
                         ),
                         "retrieval_distance": buffered_distance,
+                        "candidate_indices": (
+                            buffered_diagnostics.get("candidate_indices")
+                            if replanned
+                            else None
+                        ),
+                        "candidate_chunk_ids": (
+                            [
+                                str(bank_records[index]["chunk_id"])
+                                for index in buffered_diagnostics.get(
+                                    "candidate_indices",
+                                    [],
+                                )
+                            ]
+                            if replanned
+                            else None
+                        ),
+                        "candidate_distances": (
+                            buffered_diagnostics.get("candidate_distances")
+                            if replanned
+                            else None
+                        ),
+                        "mixture_prior": (
+                            buffered_diagnostics.get("mixture_prior")
+                            if replanned
+                            else None
+                        ),
+                        "mixture_posterior": (
+                            buffered_diagnostics.get("mixture_posterior")
+                            if replanned
+                            else None
+                        ),
+                        "maximum_odds_distortion": (
+                            buffered_diagnostics.get(
+                                "maximum_odds_distortion"
+                            )
+                            if replanned
+                            else None
+                        ),
+                        "normalized_action_span_diameter": (
+                            buffered_diagnostics.get(
+                                "normalized_action_span_diameter"
+                            )
+                            if replanned
+                            else None
+                        ),
+                        "translation_convex_hull_max_violation": (
+                            buffered_diagnostics.get(
+                                "translation_convex_hull_max_violation"
+                            )
+                            if replanned
+                            else None
+                        ),
+                        "discrete_prior_max_abs_error": (
+                            buffered_diagnostics.get(
+                                "discrete_prior_max_abs_error"
+                            )
+                            if replanned
+                            else None
+                        ),
                         "canonical_first_action": canonical.tolist(),
                         "controller_action": converted.value.tolist(),
                         "translation_clipped": converted.translation_clipped,
@@ -1175,7 +1501,13 @@ def run(
         policy: _success_vector(rollouts[policy], config.seeds)
         for policy in config.policies
     }
-    if tuple(config.policies) == CONFORMAL_POLICIES:
+    if tuple(config.policies) == RADM_POLICIES:
+        pairs = (
+            ("bcsg_h6", "retriever_prior_mixture_h6"),
+            ("bcsg_h6", "radm_h6"),
+            ("retriever_prior_mixture_h6", "radm_h6"),
+        )
+    elif tuple(config.policies) == CONFORMAL_POLICIES:
         pairs = (
             ("phase_matched_copy_h6", "bcsg_h6"),
             ("phase_matched_copy_h6", "codra_h6"),
@@ -1212,13 +1544,22 @@ def run(
                 "current segmented pointcloud + TCP/goal/qpos canonical 17D"
             ),
             "retrieval": (
-                "checkpoint operator bank; same phase; bank-standardized 17D top-1"
+                "checkpoint operator bank; same phase; bank-standardized "
+                + (
+                    "17D top-4 distinct episodes"
+                    if tuple(config.policies) == RADM_POLICIES
+                    else "17D top-1"
+                )
             ),
             "execution": "H=6 open-loop chunk with observation/retrieval every 6 steps",
             "predictor": (
-                "strict Demo-residual QA-LRDT with BCSG and conformal support"
-                if acceptance_thresholds is not None
-                else "strict Demo-residual QA-LRDT with optional BCSG"
+                "frozen QA-LRDT/BCSG hypotheses with retriever-anchored mixture"
+                if tuple(config.policies) == RADM_POLICIES
+                else (
+                    "strict Demo-residual QA-LRDT with BCSG and conformal support"
+                    if acceptance_thresholds is not None
+                    else "strict Demo-residual QA-LRDT with optional BCSG"
+                )
             ),
             "seed_unit": "paired policy reset on identical task seed",
         },
@@ -1242,6 +1583,11 @@ def run(
         "train_manifest_sha256": _sha256(data_root / "manifest-train.jsonl"),
         "source_metadata_sha256": _sha256(source_metadata_path),
         "checkpoint_sha256": _sha256(checkpoint_path),
+        "radm_checkpoint_sha256": (
+            None
+            if radm_checkpoint_path is None
+            else _sha256(radm_checkpoint_path)
+        ),
         "checkpoint_git_commit": models.checkpoint.get("git_commit"),
         "calibration": calibration_provenance,
         "bank": {
@@ -1288,6 +1634,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--source-metadata", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--radm-checkpoint", type=Path)
     parser.add_argument("--calibration-report", type=Path)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -1306,6 +1653,11 @@ def main() -> None:
         data_root=arguments.data_root.resolve(),
         source_metadata_path=arguments.source_metadata.resolve(),
         checkpoint_path=arguments.checkpoint.resolve(),
+        radm_checkpoint_path=(
+            None
+            if arguments.radm_checkpoint is None
+            else arguments.radm_checkpoint.resolve()
+        ),
         calibration_report_path=(
             None
             if arguments.calibration_report is None
