@@ -73,6 +73,7 @@ def run(
     obs_mode: str,
     control_mode: str,
     sim_backend: str,
+    render_backend: str,
     seed: int,
     num_steps: int,
 ) -> None:
@@ -88,6 +89,7 @@ def run(
         obs_mode=obs_mode,
         control_mode=control_mode,
         sim_backend=sim_backend,
+        render_backend=render_backend,
         num_envs=1,
     )
     try:
@@ -126,6 +128,7 @@ def run(
             "obs_mode": obs_mode,
             "control_mode": control_mode,
             "sim_backend": sim_backend,
+            "render_backend": render_backend,
             "seed": seed,
             "num_steps": num_steps,
             "action_space": str(environment.action_space),
@@ -152,6 +155,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-mode", default="state")
     parser.add_argument("--control-mode", default="pd_ee_delta_pose")
     parser.add_argument("--sim-backend", default="physx_cpu")
+    parser.add_argument("--render-backend", default="none")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num-steps", type=int, default=2)
     return parser.parse_args()
@@ -166,6 +170,7 @@ def main() -> None:
         obs_mode=arguments.obs_mode,
         control_mode=arguments.control_mode,
         sim_backend=arguments.sim_backend,
+        render_backend=arguments.render_backend,
         seed=arguments.seed,
         num_steps=arguments.num_steps,
     )

@@ -8,7 +8,8 @@ Panda 单臂的 `PickCube-v1`、`PushCube-v1`、`StackCube-v1`；双臂和移动
 验证顺序：
 
 1. `audit_maniskill_archive.py` 直接读取 ZIP，核对 episode、控制器、成功率和 HDF5 shape；
-2. `smoke_maniskill.py` 在 compute 节点执行 `state + pd_ee_delta_pose + physx_cpu` reset/step；
+2. `smoke_maniskill.py` 在 compute 节点执行
+   `state + pd_ee_delta_pose + physx_cpu + render_backend=none` reset/step；
 3. 再单独申请 GPU 验证 `pointcloud + physx_cuda`，避免把渲染依赖与控制接口问题混在一起；
 4. 将官方 Demo 重放到统一 `pd_ee_delta_pose` 后生成 canonical EEF action chunks；
 5. 最后才接入 Retriever、拒绝机制与 receding-horizon Predictor。

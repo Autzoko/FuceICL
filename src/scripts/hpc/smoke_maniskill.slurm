@@ -16,6 +16,7 @@ readonly ENV_ID="${3:-PickCube-v1}"
 readonly OBS_MODE="${4:-state}"
 readonly CONTROL_MODE="${5:-pd_ee_delta_pose}"
 readonly SIM_BACKEND="${6:-physx_cpu}"
+readonly RENDER_BACKEND="${7:-none}"
 readonly ENV_NAME="FuseICL-maniskill"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 
@@ -44,5 +45,6 @@ conda run --no-capture-output -n "${ENV_NAME}" \
     --obs-mode "${OBS_MODE}" \
     --control-mode "${CONTROL_MODE}" \
     --sim-backend "${SIM_BACKEND}" \
+    --render-backend "${RENDER_BACKEND}" \
     --seed 0 \
     --num-steps 2
