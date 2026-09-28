@@ -51,9 +51,9 @@ from dev.simulator.phase_transport import (
     transport_actions,
 )
 from dev.simulator.preprocess_maniskill_chunks import (
-    _active_points,
     _canonical_geometry,
     _gripper_open,
+    _segmented_points,
 )
 from dev.simulator.train_maniskill_low_rank_transport import (
     _load_geometry_sequence,
@@ -196,7 +196,7 @@ def _observation_context(
     tcp_pose = _single(observation["extra"]["tcp_pose"]).astype(np.float64)
     goal_position = _single(observation["extra"]["goal_pos"]).astype(np.float64)
     qpos = _single(observation["agent"]["qpos"]).astype(np.float64)
-    points = _active_points(xyzw, segmentation, active_label)
+    points = _segmented_points(xyzw, segmentation, active_label)
     center = points.mean(axis=0) if len(points) else None
     if len(points) < minimum_label_points:
         return ObservationContext(
