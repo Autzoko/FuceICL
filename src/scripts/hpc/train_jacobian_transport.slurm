@@ -1,11 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=jacobian-transport
-#SBATCH --partition=nvidia
-#SBATCH --gres=gpu:v100:1
+#SBATCH --partition=compute
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=/scratch/ll5582/data/RLBench/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/RLBench/logs/%x-%j.err
 
@@ -35,4 +34,4 @@ conda run --no-capture-output -n "${ENV_NAME}" \
     --text-scores "${TEXT_SCORES}" \
     --output-root "${OUTPUT_ROOT}" \
     --config "${CONFIG_PATH}" \
-    --device cuda
+    --device cpu
