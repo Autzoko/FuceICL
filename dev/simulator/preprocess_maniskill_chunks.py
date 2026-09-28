@@ -181,14 +181,10 @@ def _active_points(
     xyzw: np.ndarray,
     segmentation: np.ndarray,
     label: int,
-    minimum_points: int,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     valid = np.abs(xyzw[:, 3]) > 0.5
     mask = valid & (segmentation.reshape(-1) == label)
-    points = np.asarray(xyzw[mask, :3], dtype=np.float64)
-    if len(points) < minimum_points:
-        raise ValueError(f"active label={label} 只有 {len(points)} 点")
-    return points, points.mean(axis=0)
+    return np.asarray(xyzw[mask, :3], dtype=np.float64)
 
 
 def _sample_centered_points(
@@ -387,16 +383,22 @@ def run(
                 split = split_by_episode[key]
                 frame_errors = []
                 frame_point_counts = []
+                skipped_low_visibility = []
                 max_query_frame = len(tcp_poses) - 1 - (
                     config.horizon * config.frame_stride
                 )
                 for frame in range(max_query_frame + 1):
-                    points, center = _active_points(
+                    points = _active_points(
                         np.asarray(xyzw[frame]),
                         np.asarray(segmentation[frame]),
                         label,
-                        config.minimum_label_points,
                     )
+                    if len(points) < config.minimum_label_points:
+                        skipped_low_visibility.append(
+                            {"frame": frame, "visible_points": len(points)}
+                        )
+                        continue
+                    center = points.mean(axis=0)
                     centroid_error = float(
                         np.linalg.norm(center - cube_positions[frame])
                     )
@@ -449,11 +451,14 @@ def run(
                     )
                     frame_errors.append(centroid_error)
                     frame_point_counts.append(len(points))
+                if not frame_errors:
+                    raise ValueError(f"{key} 没有满足可见点门槛的 query frame")
                 diagnostics[split].append(
                     {
                         "trajectory": key,
                         "active_label": label,
-                        "chunks": max_query_frame + 1,
+                        "chunks": len(frame_errors),
+                        "skipped_low_visibility": skipped_low_visibility,
                         "point_count_min": min(frame_point_counts),
                         "point_count_max": max(frame_point_counts),
                         "centroid_error_max_m": max(frame_errors),
@@ -475,6 +480,10 @@ def run(
             summary["splits"][split] = {
                 "episodes": len(diagnostics[split]),
                 "chunks": len(records),
+                "skipped_low_visibility": sum(
+                    len(record["skipped_low_visibility"])
+                    for record in diagnostics[split]
+                ),
                 "centroid_error_m": {
                     "mean": float(errors.mean()),
                     "p95": float(np.quantile(errors, 0.95)),
