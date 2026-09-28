@@ -1,0 +1,525 @@
+"""把 ManiSkill pointcloud replay 转为感知式 canonical geometry/action chunks。"""
+
+from __future__ import annotations
+
+import argparse
+from collections import Counter
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+from typing import Any, Iterable, Mapping
+
+import h5py
+import numpy as np
+
+from dev.predictor.action_chunk_data import matrix_to_axis_angle
+from dev.predictor.canonical_geometry import FEATURE_NAMES, GEOMETRY_DIM
+
+
+@dataclass(frozen=True)
+class ManiSkillChunkConfig:
+    """PickCube pilot 的固定预处理协议。"""
+
+    schema_version: str
+    seed: int
+    horizon: int
+    frame_stride: int
+    points_per_object: int
+    label_probe_frames: int
+    minimum_label_points: int
+    maximum_centroid_error_m: float
+    validation_episodes: int
+    shard_size: int
+
+    @classmethod
+    def from_json(cls, path: Path) -> "ManiSkillChunkConfig":
+        return cls(**json.loads(path.read_text(encoding="utf-8")))
+
+    def __post_init__(self) -> None:
+        if not self.schema_version.strip():
+            raise ValueError("schema_version 不能为空")
+        positive = (
+            self.horizon,
+            self.frame_stride,
+            self.points_per_object,
+            self.label_probe_frames,
+            self.minimum_label_points,
+            self.maximum_centroid_error_m,
+            self.validation_episodes,
+            self.shard_size,
+        )
+        if min(positive) <= 0:
+            raise ValueError("chunk、点数、阈值与 episode 数必须为正")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _quaternion_wxyz_to_matrix(quaternion: np.ndarray) -> np.ndarray:
+    """将 ManiSkill/SAPIEN ``wxyz`` quaternion 转为旋转矩阵。"""
+    w, x, y, z = np.asarray(quaternion, dtype=np.float64)
+    norm = float(np.linalg.norm((w, x, y, z)))
+    if norm <= 1e-12:
+        raise ValueError("TCP quaternion 退化")
+    w, x, y, z = np.asarray((w, x, y, z), dtype=np.float64) / norm
+    return np.asarray(
+        [
+            [
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - z * w),
+                2.0 * (x * z + y * w),
+            ],
+            [
+                2.0 * (x * y + z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - x * w),
+            ],
+            [
+                2.0 * (x * z - y * w),
+                2.0 * (y * z + x * w),
+                1.0 - 2.0 * (x * x + y * y),
+            ],
+        ],
+        dtype=np.float64,
+    )
+
+
+def _shape_sigmas(points: np.ndarray) -> np.ndarray:
+    centered = points - points.mean(axis=0, keepdims=True)
+    denominator = max(len(points) - 1, 1)
+    covariance = centered.T @ centered / denominator
+    eigenvalues = np.linalg.eigvalsh(covariance).clip(min=0.0)
+    return np.sqrt(eigenvalues)[::-1].astype(np.float32)
+
+
+def _gripper_open(qpos: np.ndarray) -> float:
+    """Panda 两个 4 cm finger joints 映射为 [0,1] opening。"""
+    if qpos.shape[-1] < 2:
+        raise ValueError("Panda qpos 缺少 finger joints")
+    width = float(qpos[-2] + qpos[-1])
+    return float(np.clip(width / 0.08, 0.0, 1.0))
+
+
+def _label_centroids(
+    xyzw: np.ndarray,
+    segmentation: np.ndarray,
+    minimum_points: int,
+) -> dict[int, tuple[np.ndarray, int]]:
+    valid = np.abs(xyzw[:, 3]) > 0.5
+    labels = segmentation.reshape(-1)
+    result: dict[int, tuple[np.ndarray, int]] = {}
+    for label in np.unique(labels[valid]):
+        mask = valid & (labels == label)
+        count = int(mask.sum())
+        if count < minimum_points:
+            continue
+        points = np.asarray(xyzw[mask, :3], dtype=np.float64)
+        result[int(label)] = (points.mean(axis=0), count)
+    return result
+
+
+def _infer_active_label(
+    *,
+    xyzw: h5py.Dataset,
+    segmentation: h5py.Dataset,
+    cube_positions: np.ndarray,
+    config: ManiSkillChunkConfig,
+) -> tuple[int, dict[str, Any]]:
+    """用少量离线 actor supervision 自动匹配 cube segmentation label。"""
+    votes: Counter[int] = Counter()
+    distances: dict[int, list[float]] = {}
+    probe_count = min(config.label_probe_frames, len(cube_positions))
+    for frame in range(probe_count):
+        candidates = _label_centroids(
+            np.asarray(xyzw[frame]),
+            np.asarray(segmentation[frame]),
+            config.minimum_label_points,
+        )
+        if not candidates:
+            raise ValueError(f"frame {frame} 没有满足点数门槛的 segmentation label")
+        label, (centroid, _) = min(
+            candidates.items(),
+            key=lambda item: float(
+                np.linalg.norm(item[1][0] - cube_positions[frame])
+            ),
+        )
+        distance = float(np.linalg.norm(centroid - cube_positions[frame]))
+        votes[label] += 1
+        distances.setdefault(label, []).append(distance)
+    label = min(
+        votes,
+        key=lambda value: (-votes[value], float(np.mean(distances[value])), value),
+    )
+    probe_errors = distances[label]
+    if max(probe_errors) > config.maximum_centroid_error_m:
+        raise ValueError(
+            f"cube label={label} probe centroid error={max(probe_errors):.4f} m 超限"
+        )
+    return label, {
+        "votes": {str(key): value for key, value in sorted(votes.items())},
+        "selected_probe_error_max_m": max(probe_errors),
+        "selected_probe_error_mean_m": float(np.mean(probe_errors)),
+    }
+
+
+def _active_points(
+    xyzw: np.ndarray,
+    segmentation: np.ndarray,
+    label: int,
+    minimum_points: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    valid = np.abs(xyzw[:, 3]) > 0.5
+    mask = valid & (segmentation.reshape(-1) == label)
+    points = np.asarray(xyzw[mask, :3], dtype=np.float64)
+    if len(points) < minimum_points:
+        raise ValueError(f"active label={label} 只有 {len(points)} 点")
+    return points, points.mean(axis=0)
+
+
+def _sample_centered_points(
+    points: np.ndarray,
+    center: np.ndarray,
+    *,
+    count: int,
+    seed: int,
+) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    indices = rng.choice(len(points), size=count, replace=len(points) < count)
+    return (points[indices] - center).astype(np.float32)
+
+
+def _canonical_geometry(
+    *,
+    active_points: np.ndarray,
+    active_center: np.ndarray,
+    goal_position: np.ndarray,
+    tcp_poses: np.ndarray,
+    qpos: np.ndarray,
+    frame: int,
+) -> np.ndarray:
+    pose = np.asarray(tcp_poses[frame], dtype=np.float64)
+    rotation = _quaternion_wxyz_to_matrix(pose[3:7])
+    active_in_eef = rotation.T @ (active_center - pose[:3])
+    target_from_active = rotation.T @ (goal_position - active_center)
+    world_velocity = (
+        np.zeros(3, dtype=np.float64)
+        if frame == 0
+        else pose[:3] - np.asarray(tcp_poses[frame - 1, :3], dtype=np.float64)
+    )
+    local_velocity = rotation.T @ world_velocity
+    geometry = np.concatenate(
+        (
+            active_in_eef,
+            target_from_active,
+            _shape_sigmas(active_points),
+            np.zeros(3, dtype=np.float32),
+            local_velocity,
+            np.asarray([_gripper_open(qpos[frame]), 1.0]),
+        )
+    ).astype(np.float32)
+    if geometry.shape != (GEOMETRY_DIM,) or not np.isfinite(geometry).all():
+        raise ValueError(f"canonical geometry shape/value 错误：{geometry.shape}")
+    return geometry
+
+
+def _canonical_action_chunk(
+    *,
+    tcp_poses: np.ndarray,
+    qpos: np.ndarray,
+    frame: int,
+    config: ManiSkillChunkConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    query_pose = np.asarray(tcp_poses[frame], dtype=np.float64)
+    query_rotation = _quaternion_wxyz_to_matrix(query_pose[3:7])
+    actions = np.empty((config.horizon, 7), dtype=np.float32)
+    target_frames = np.empty(config.horizon, dtype=np.int32)
+    for step in range(config.horizon):
+        target_frame = frame + (step + 1) * config.frame_stride
+        target_pose = np.asarray(tcp_poses[target_frame], dtype=np.float64)
+        target_rotation = _quaternion_wxyz_to_matrix(target_pose[3:7])
+        actions[step, :3] = (
+            query_rotation.T @ (target_pose[:3] - query_pose[:3])
+        ).astype(np.float32)
+        actions[step, 3:6] = matrix_to_axis_angle(
+            query_rotation.T @ target_rotation
+        )
+        actions[step, 6] = _gripper_open(qpos[target_frame])
+        target_frames[step] = target_frame
+    if not np.isfinite(actions).all():
+        raise ValueError("canonical action chunk 含 NaN/Inf")
+    return actions, target_frames
+
+
+class _ShardWriter:
+    def __init__(self, root: Path, split: str, shard_size: int) -> None:
+        self.root = root
+        self.split = split
+        self.shard_size = shard_size
+        self.pending: list[tuple[dict[str, Any], dict[str, np.ndarray]]] = []
+        self.records: list[dict[str, Any]] = []
+        self.checksums: dict[str, str] = {}
+        self.index = 0
+
+    def add(self, metadata: dict[str, Any], arrays: dict[str, np.ndarray]) -> None:
+        self.pending.append((metadata, arrays))
+        if len(self.pending) >= self.shard_size:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self.pending:
+            return
+        relative = f"shards/{self.split}-{self.index:05d}.npz"
+        path = self.root / relative
+        names = tuple(self.pending[0][1])
+        np.savez_compressed(
+            path,
+            **{
+                name: np.stack([arrays[name] for _, arrays in self.pending])
+                for name in names
+            },
+        )
+        self.checksums[relative] = _sha256(path)
+        for row, (metadata, _) in enumerate(self.pending):
+            self.records.append({**metadata, "shard": relative, "row": row})
+        self.pending.clear()
+        self.index += 1
+
+    def close(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        self.flush()
+        return self.records, self.checksums
+
+
+def _episode_split(keys: list[str], validation_episodes: int, seed: int) -> dict[str, str]:
+    if validation_episodes >= len(keys):
+        raise ValueError("validation episodes 必须少于总 episodes")
+    ranked = sorted(
+        keys,
+        key=lambda key: hashlib.sha256(f"{seed}:{key}".encode()).hexdigest(),
+    )
+    validation = set(ranked[:validation_episodes])
+    return {key: "val" if key in validation else "train" for key in keys}
+
+
+def run(
+    *,
+    h5_path: Path,
+    metadata_path: Path,
+    output_root: Path,
+    config: ManiSkillChunkConfig,
+) -> None:
+    if output_root.exists():
+        raise FileExistsError(f"输出目录已存在，拒绝覆盖：{output_root}")
+    temporary = output_root.with_name(f".{output_root.name}.incomplete-{os.getpid()}")
+    temporary.mkdir(parents=True)
+    temporary.joinpath("shards").mkdir()
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    summary: dict[str, Any] = {
+        "schema_version": config.schema_version,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "config": asdict(config),
+        "feature_names": FEATURE_NAMES,
+        "source": {
+            "h5": str(h5_path),
+            "h5_sha256": _sha256(h5_path),
+            "metadata": str(metadata_path),
+            "metadata_sha256": _sha256(metadata_path),
+            "env_info": metadata.get("env_info", {}),
+        },
+        "representations": {
+            "tcp_quaternion": "wxyz (ManiSkill/SAPIEN raw pose)",
+            "geometry": "17D query-EEF canonical geometry",
+            "action": "cumulative query-EEF [translation, axis-angle, gripper_open]",
+            "pointcloud": "active-object points centered by observed centroid",
+        },
+        "privileged_supervision": (
+            "cube actor position is used only to identify a segmentation label; "
+            "stored geometry uses the observed point centroid"
+        ),
+        "splits": {},
+    }
+    try:
+        with h5py.File(h5_path, "r") as handle:
+            keys = sorted(
+                (key for key in handle if key.startswith("traj_")),
+                key=lambda value: int(value.split("_")[1]),
+            )
+            if len(keys) != len(metadata.get("episodes", [])):
+                raise ValueError("HDF5 trajectory 数与 metadata episodes 不一致")
+            split_by_episode = _episode_split(
+                keys, config.validation_episodes, config.seed
+            )
+            writers = {
+                split: _ShardWriter(temporary, split, config.shard_size)
+                for split in ("train", "val")
+            }
+            diagnostics = {split: [] for split in writers}
+            for key in keys:
+                trajectory = handle[key]
+                xyzw = trajectory["obs/pointcloud/xyzw"]
+                segmentation = trajectory["obs/pointcloud/segmentation"]
+                tcp_poses = np.asarray(trajectory["obs/extra/tcp_pose"])
+                goal_positions = np.asarray(trajectory["obs/extra/goal_pos"])
+                qpos = np.asarray(trajectory["obs/agent/qpos"])
+                cube_positions = np.asarray(
+                    trajectory["env_states/actors/cube"][:, :3]
+                )
+                label, label_diagnostic = _infer_active_label(
+                    xyzw=xyzw,
+                    segmentation=segmentation,
+                    cube_positions=cube_positions,
+                    config=config,
+                )
+                split = split_by_episode[key]
+                frame_errors = []
+                frame_point_counts = []
+                max_query_frame = len(tcp_poses) - 1 - (
+                    config.horizon * config.frame_stride
+                )
+                for frame in range(max_query_frame + 1):
+                    points, center = _active_points(
+                        np.asarray(xyzw[frame]),
+                        np.asarray(segmentation[frame]),
+                        label,
+                        config.minimum_label_points,
+                    )
+                    centroid_error = float(
+                        np.linalg.norm(center - cube_positions[frame])
+                    )
+                    if centroid_error > config.maximum_centroid_error_m:
+                        raise ValueError(
+                            f"{key} frame={frame} cube centroid error="
+                            f"{centroid_error:.4f} m 超限"
+                        )
+                    identifier = f"maniskill:PickCube-v1:{key}:f{frame:03d}"
+                    seed = int.from_bytes(
+                        hashlib.sha256(identifier.encode()).digest()[:8], "little"
+                    )
+                    sampled = _sample_centered_points(
+                        points,
+                        center,
+                        count=config.points_per_object,
+                        seed=seed,
+                    )
+                    geometry = _canonical_geometry(
+                        active_points=points,
+                        active_center=center,
+                        goal_position=goal_positions[frame],
+                        tcp_poses=tcp_poses,
+                        qpos=qpos,
+                        frame=frame,
+                    )
+                    actions, target_frames = _canonical_action_chunk(
+                        tcp_poses=tcp_poses,
+                        qpos=qpos,
+                        frame=frame,
+                        config=config,
+                    )
+                    writers[split].add(
+                        {
+                            "chunk_id": identifier,
+                            "split": split,
+                            "task": "PickCube-v1",
+                            "episode": int(key.split("_")[1]),
+                            "frame": frame,
+                            "active_label": label,
+                            "active_point_count": len(points),
+                            "centroid_error_m": centroid_error,
+                        },
+                        {
+                            "active_points": sampled,
+                            "geometry": geometry,
+                            "actions": actions,
+                            "target_frames": target_frames,
+                        },
+                    )
+                    frame_errors.append(centroid_error)
+                    frame_point_counts.append(len(points))
+                diagnostics[split].append(
+                    {
+                        "trajectory": key,
+                        "active_label": label,
+                        "chunks": max_query_frame + 1,
+                        "point_count_min": min(frame_point_counts),
+                        "point_count_max": max(frame_point_counts),
+                        "centroid_error_max_m": max(frame_errors),
+                        **label_diagnostic,
+                    }
+                )
+
+        checksums: dict[str, str] = {}
+        for split, writer in writers.items():
+            records, shard_checksums = writer.close()
+            manifest = temporary / f"manifest-{split}.jsonl"
+            _write_jsonl(manifest, records)
+            checksums.update(shard_checksums)
+            checksums[manifest.name] = _sha256(manifest)
+            errors = np.asarray(
+                [record["centroid_error_m"] for record in records],
+                dtype=np.float64,
+            )
+            summary["splits"][split] = {
+                "episodes": len(diagnostics[split]),
+                "chunks": len(records),
+                "centroid_error_m": {
+                    "mean": float(errors.mean()),
+                    "p95": float(np.quantile(errors, 0.95)),
+                    "max": float(errors.max()),
+                },
+                "trajectories": diagnostics[split],
+            }
+        summary_path = temporary / "summary.json"
+        summary_path.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        checksums[summary_path.name] = _sha256(summary_path)
+        temporary.joinpath("SHA256SUMS").write_text(
+            "".join(
+                f"{digest}  {name}\n"
+                for name, digest in sorted(checksums.items())
+            ),
+            encoding="utf-8",
+        )
+        temporary.rename(output_root)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+    print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--h5", type=Path, required=True)
+    parser.add_argument("--metadata", type=Path, required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--config", type=Path, required=True)
+    return parser.parse_args()
+
+
+def main() -> None:
+    arguments = parse_args()
+    run(
+        h5_path=arguments.h5.resolve(),
+        metadata_path=arguments.metadata.resolve(),
+        output_root=arguments.output_root.resolve(),
+        config=ManiSkillChunkConfig.from_json(arguments.config.resolve()),
+    )
+
+
+if __name__ == "__main__":
+    main()

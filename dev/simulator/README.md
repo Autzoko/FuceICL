@@ -40,3 +40,14 @@ sbatch src/scripts/hpc/replay_maniskill_pointcloud.slurm \
 重放结束后必须运行 `audit_replayed_trajectory.py`，核对 7D action、episode 成功标签、
 observation/action 时间偏移、16k pointcloud、有限值和 segmentation labels；审计通过前不进入
 chunk 预处理。
+
+审计通过后，自动用 replay 中的 cube actor position 只做离线 segmentation-label 对齐；正式
+chunk 中只保存点云质心得到的 geometry、下采样点和 canonical actions：
+
+```bash
+sbatch src/scripts/hpc/preprocess_maniskill_chunks.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.h5 \
+  /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1
+```
