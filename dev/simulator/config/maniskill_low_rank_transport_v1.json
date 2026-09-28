@@ -1,0 +1,19 @@
+{
+  "schema_version": "maniskill-low-rank-demo-transport-v1",
+  "seed": 20260928,
+  "epochs": 60,
+  "batch_size": 256,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "gradient_clip_norm": 1.0,
+  "stability_weight": 0.00001,
+  "rank": 4,
+  "hidden_dim": 96,
+  "num_layers": 2,
+  "num_heads": 4,
+  "feedforward_dim": 192,
+  "dropout": 0.1,
+  "residual_limit": 2.0,
+  "bootstrap_resamples": 5000,
+  "latency_iterations": 200
+}
