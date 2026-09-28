@@ -52,3 +52,18 @@ def test_rank_capacity_and_operator_diagnostics() -> None:
     assert bounds.shape == (3, 6)
     assert torch.all(bounds >= 0)
     assert sum(parameter.numel() for parameter in model.parameters()) < 1_000_000
+
+
+def test_transition_context_preserves_structural_constraints() -> None:
+    config = LowRankTransportConfig(transition_context=True)
+    model = LowRankDemoActionTransport(config).eval()
+    query, demo, actions, mask = _inputs()
+    future = torch.randn(3, 6, 17, generator=torch.Generator().manual_seed(23))
+    sequence = torch.cat((demo[:, None, :], future), dim=1)
+
+    identity = model(demo, demo, actions, mask, sequence)
+    assert torch.equal(identity, actions)
+
+    no_demo = model(query, demo, actions, torch.zeros_like(mask), sequence)
+    assert torch.equal(no_demo, torch.zeros_like(actions))
+    assert sum(parameter.numel() for parameter in model.parameters()) < 1_000_000

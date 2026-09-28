@@ -58,6 +58,7 @@ class TrainConfig:
     residual_limit: float
     bootstrap_resamples: int
     latency_iterations: int
+    use_demo_geometry_sequence: bool = False
 
     @classmethod
     def from_json(cls, path: Path) -> "TrainConfig":
@@ -102,6 +103,8 @@ class TaskData:
     val_records: list[dict[str, Any]]
     val_geometry: torch.Tensor
     val_actions: torch.Tensor
+    train_geometry_sequence: torch.Tensor | None
+    val_geometry_sequence: torch.Tensor | None
 
 
 def _git_commit(root: Path) -> str:
@@ -122,6 +125,23 @@ def _seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
+def _load_geometry_sequence(
+    root: Path,
+    records: Sequence[dict[str, Any]],
+) -> torch.Tensor:
+    cache: dict[str, np.ndarray] = {}
+    values = []
+    for record in records:
+        relative = str(record["shard"])
+        if relative not in cache:
+            with np.load(root / relative) as archive:
+                if "geometry_sequence" not in archive:
+                    raise KeyError(f"{root / relative} 缺少 geometry_sequence")
+                cache[relative] = np.asarray(archive["geometry_sequence"])
+        values.append(cache[relative][int(record["row"])])
+    return torch.from_numpy(np.stack(values)).float()
+
+
 def _load_task(root: Path) -> TaskData:
     summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
     scales, translation, rotation, representation = _action_protocol(root)
@@ -131,6 +151,15 @@ def _load_task(root: Path) -> TaskData:
         scales,
     )
     val_records, val_geometry, val_actions = _load_split(root, "val", scales)
+    stores_sequence = bool(
+        summary.get("config", {}).get("store_geometry_sequence", False)
+    )
+    train_sequence = (
+        _load_geometry_sequence(root, train_records) if stores_sequence else None
+    )
+    val_sequence = (
+        _load_geometry_sequence(root, val_records) if stores_sequence else None
+    )
     task_id = str(
         summary.get("config", {}).get("task_id")
         or summary.get("source", {}).get("env_info", {}).get("env_id")
@@ -158,6 +187,8 @@ def _load_task(root: Path) -> TaskData:
         val_records=val_records,
         val_geometry=val_geometry,
         val_actions=val_actions,
+        train_geometry_sequence=train_sequence,
+        val_geometry_sequence=val_sequence,
     )
 
 
@@ -207,10 +238,21 @@ def _wrong_task_demo(
     tasks: Sequence[TaskData],
     mean: torch.Tensor,
     std: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     candidates = [task for task in tasks if task.task_id != query.task_id]
     geometry = torch.cat([task.train_geometry for task in candidates])
     actions = torch.cat([task.train_actions for task in candidates])
+    sequence = (
+        torch.cat(
+            [
+                task.train_geometry_sequence
+                for task in candidates
+                if task.train_geometry_sequence is not None
+            ]
+        )
+        if all(task.train_geometry_sequence is not None for task in candidates)
+        else None
+    )
     distances = torch.cdist(
         (query.val_geometry - mean) / std,
         (geometry - mean) / std,
@@ -219,7 +261,11 @@ def _wrong_task_demo(
     if not bool(valid.any(dim=1).all()):
         raise ValueError(f"{query.task_id} 缺少 wrong-task phase-matched Demo")
     indices = distances.masked_fill(~valid, torch.inf).argmin(dim=1)
-    return geometry[indices], actions[indices]
+    return (
+        geometry[indices],
+        actions[indices],
+        sequence[indices] if sequence is not None else None,
+    )
 
 
 def _build_model(
@@ -240,6 +286,7 @@ def _build_model(
         feedforward_dim=config.feedforward_dim,
         dropout=config.dropout,
         residual_limit=config.residual_limit,
+        transition_context=config.use_demo_geometry_sequence,
     )
     return LowRankDemoActionTransport(
         model_config,
@@ -278,18 +325,28 @@ def _train(
         totals = {"loss": 0.0, "prediction": 0.0, "stability": 0.0}
         examples = 0
         model.train()
-        for query, target, demo_geometry, demo_actions in loader:
+        for query, target, demo_geometry, demo_actions, demo_sequence in loader:
             query = query.to(device)
             target = target.to(device)
             demo_geometry = demo_geometry.to(device)
             demo_actions = demo_actions.to(device)
+            demo_sequence = demo_sequence.to(device)
             mask = torch.ones(
                 demo_actions.shape[:2],
                 dtype=torch.bool,
                 device=device,
             )
             optimizer.zero_grad(set_to_none=True)
-            prediction = model(query, demo_geometry, demo_actions, mask)
+            sequence_context = (
+                demo_sequence if config.use_demo_geometry_sequence else None
+            )
+            prediction = model(
+                query,
+                demo_geometry,
+                demo_actions,
+                mask,
+                sequence_context,
+            )
             prediction_loss = _masked_sample_loss(
                 prediction,
                 target,
@@ -299,6 +356,7 @@ def _train(
                 demo_geometry,
                 demo_actions,
                 mask,
+                sequence_context,
             )
             stability_loss = bounds.square().mean()
             loss = prediction_loss + config.stability_weight * stability_loss
@@ -331,6 +389,7 @@ def _predict(
     demo_actions: torch.Tensor,
     device: torch.device,
     *,
+    demo_geometry_sequence: torch.Tensor | None = None,
     valid_demo: bool = True,
 ) -> torch.Tensor:
     mask = torch.full(
@@ -344,6 +403,11 @@ def _predict(
         demo_geometry.to(device),
         demo_actions.to(device),
         mask,
+        (
+            demo_geometry_sequence.to(device)
+            if demo_geometry_sequence is not None
+            else None
+        ),
     ).cpu()
 
 
@@ -358,15 +422,21 @@ def _latency(
     query = task.val_geometry[:1].to(device)
     demo_geometry = task.train_geometry[demo_indices[:1]].to(device)
     demo_actions = task.train_actions[demo_indices[:1]].to(device)
+    demo_sequence = (
+        task.train_geometry_sequence[demo_indices[:1]].to(device)
+        if model.config.transition_context
+        and task.train_geometry_sequence is not None
+        else None
+    )
     mask = torch.ones((1, demo_actions.shape[1]), dtype=torch.bool, device=device)
     for _ in range(20):
-        model(query, demo_geometry, demo_actions, mask)
+        model(query, demo_geometry, demo_actions, mask, demo_sequence)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     samples = []
     for _ in range(iterations):
         start = time.perf_counter()
-        model(query, demo_geometry, demo_actions, mask)
+        model(query, demo_geometry, demo_actions, mask, demo_sequence)
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         samples.append(1000.0 * (time.perf_counter() - start))
@@ -423,6 +493,7 @@ def run(
     train_targets = []
     train_demo_geometry = []
     train_demo_actions = []
+    train_demo_sequences = []
     train_selection: dict[str, dict[str, Any]] = {}
     val_selection: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for task in tasks:
@@ -447,15 +518,36 @@ def run(
             "distance_p95": float(torch.quantile(train_distances, 0.95)),
         }
         if task.task_id != held_out_task:
+            if (
+                config.use_demo_geometry_sequence
+                and task.train_geometry_sequence is None
+            ):
+                raise ValueError(
+                    f"{task.task_id} 未提供所需的 geometry_sequence"
+                )
             train_queries.append(task.train_geometry)
             train_targets.append(task.train_actions)
             train_demo_geometry.append(task.train_geometry[train_indices])
             train_demo_actions.append(task.train_actions[train_indices])
+            if config.use_demo_geometry_sequence:
+                if task.train_geometry_sequence is None:
+                    raise RuntimeError("geometry_sequence 前置检查失效")
+                train_demo_sequences.append(
+                    task.train_geometry_sequence[train_indices]
+                )
+            else:
+                repeated = task.train_geometry[train_indices, None, :].expand(
+                    -1,
+                    task.train_actions.shape[1] + 1,
+                    -1,
+                )
+                train_demo_sequences.append(repeated.clone())
 
     query_tensor = torch.cat(train_queries)
     target_tensor = torch.cat(train_targets)
     demo_geometry_tensor = torch.cat(train_demo_geometry)
     demo_action_tensor = torch.cat(train_demo_actions)
+    demo_sequence_tensor = torch.cat(train_demo_sequences)
     geometry_mean = query_tensor.mean(dim=0)
     geometry_std = query_tensor.std(dim=0, unbiased=False).clamp_min(1e-4)
     dataset = TensorDataset(
@@ -463,6 +555,7 @@ def run(
         target_tensor,
         demo_geometry_tensor,
         demo_action_tensor,
+        demo_sequence_tensor,
     )
     model = _build_model(
         config,
@@ -486,6 +579,14 @@ def run(
         indices, distances = val_selection[task.task_id]
         demo_geometry = task.train_geometry[indices]
         demo_actions = task.train_actions[indices]
+        demo_sequence = (
+            task.train_geometry_sequence[indices]
+            if config.use_demo_geometry_sequence
+            and task.train_geometry_sequence is not None
+            else None
+        )
+        if config.use_demo_geometry_sequence and demo_sequence is None:
+            raise ValueError(f"{task.task_id} validation 缺少 geometry_sequence")
         mask = torch.ones(task.val_actions.shape[:2], dtype=torch.bool)
         prediction = _predict(
             model,
@@ -493,6 +594,7 @@ def run(
             demo_geometry,
             demo_actions,
             device,
+            demo_geometry_sequence=demo_sequence,
         )
         no_demo = _predict(
             model,
@@ -500,20 +602,28 @@ def run(
             torch.zeros_like(task.val_geometry),
             torch.zeros_like(task.val_actions),
             device,
+            demo_geometry_sequence=(
+                torch.zeros_like(demo_sequence)
+                if demo_sequence is not None
+                else None
+            ),
             valid_demo=False,
         )
-        wrong_geometry, wrong_actions = _wrong_task_demo(
+        wrong_geometry, wrong_actions, wrong_sequence = _wrong_task_demo(
             task,
             tasks,
             geometry_mean,
             geometry_std,
         )
+        if config.use_demo_geometry_sequence and wrong_sequence is None:
+            raise ValueError(f"{task.task_id} wrong-task Demo 缺少 geometry_sequence")
         wrong_task = _predict(
             model,
             task.val_geometry,
             wrong_geometry,
             wrong_actions,
             device,
+            demo_geometry_sequence=wrong_sequence,
         )
         shuffled_actions = torch.roll(demo_actions, shifts=1, dims=0)
         shuffled = _predict(
@@ -522,6 +632,7 @@ def run(
             demo_geometry,
             shuffled_actions,
             device,
+            demo_geometry_sequence=demo_sequence,
         )
         identity = _predict(
             model,
@@ -529,6 +640,7 @@ def run(
             demo_geometry,
             demo_actions,
             device,
+            demo_geometry_sequence=demo_sequence,
         )
         identity_error = max(
             identity_error,
@@ -600,7 +712,11 @@ def run(
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "protocol": {
             "predictor": "rank-4 Demo-conditioned local action transport",
-            "input": "17D query/Demo canonical geometry + Demo Hx7 action",
+            "input": (
+                "17D query geometry + Demo (H+1)x17 geometry sequence + Hx7 action"
+                if config.use_demo_geometry_sequence
+                else "17D query/Demo canonical geometry + Demo Hx7 action"
+            ),
             "retrieval": "per-task standardized geometry, phase matched, cross episode",
             "output": "Demo action plus continuous 6D low-rank residual; Demo gripper unchanged",
             "checkpoint_selection": "fixed final epoch; validation unused",
@@ -626,6 +742,7 @@ def run(
             "no_demo_max_abs_output": no_demo_error,
             "query_only_action_head": False,
             "transport_rank": config.rank,
+            "demo_transition_context": config.use_demo_geometry_sequence,
         },
         "latency": _latency(
             model,

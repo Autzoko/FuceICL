@@ -30,6 +30,7 @@ class LowRankTransportConfig:
     dropout: float = 0.1
     residual_limit: float = 2.0
     geometry_mask: tuple[float, ...] | None = None
+    transition_context: bool = False
 
     def __post_init__(self) -> None:
         positive = (
@@ -109,6 +110,11 @@ class LowRankDemoActionTransport(nn.Module):
             self.config.geometry_dim,
             self.config.hidden_dim,
         )
+        self.transition_projection = (
+            nn.Linear(self.config.geometry_dim, self.config.hidden_dim)
+            if self.config.transition_context
+            else None
+        )
         self.positions = nn.Parameter(
             torch.empty(self.config.horizon, self.config.hidden_dim)
         )
@@ -142,6 +148,7 @@ class LowRankDemoActionTransport(nn.Module):
         demo_geometry: torch.Tensor,
         demo_actions: torch.Tensor,
         valid: torch.Tensor,
+        demo_geometry_sequence: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         mask = valid.float().unsqueeze(-1)
         global_valid = valid.any(dim=1, keepdim=True).float()
@@ -151,9 +158,38 @@ class LowRankDemoActionTransport(nn.Module):
             * self.geometry_feature_mask
             * global_valid
         )
+        if self.config.transition_context:
+            expected = (
+                len(demo_actions),
+                self.config.horizon + 1,
+                self.config.geometry_dim,
+            )
+            if demo_geometry_sequence is None or demo_geometry_sequence.shape != expected:
+                raise ValueError(
+                    "transition context 要求 demo_geometry_sequence shape="
+                    f"{expected}"
+                )
+            sequence = (
+                (demo_geometry_sequence - self.geometry_mean)
+                / self.geometry_std
+                * self.geometry_feature_mask
+                * global_valid[:, None, :]
+            )
+            transitions = (
+                (demo_geometry_sequence[:, 1:] - demo_geometry_sequence[:, :-1])
+                / self.geometry_std
+                * self.geometry_feature_mask
+                * global_valid[:, None, :]
+            )
+            geometry_tokens = self.geometry_projection(sequence[:, :-1])
+            if self.transition_projection is None:
+                raise RuntimeError("transition projection 未初始化")
+            geometry_tokens = geometry_tokens + self.transition_projection(transitions)
+        else:
+            geometry_tokens = self.geometry_projection(normalized_demo)[:, None, :]
         tokens = (
             self.action_projection(demo_actions * mask)
-            + self.geometry_projection(normalized_demo)[:, None, :]
+            + geometry_tokens
             + self.positions[None, :, :]
         ) * mask
         safe_valid = valid.clone()
@@ -179,12 +215,14 @@ class LowRankDemoActionTransport(nn.Module):
         demo_geometry: torch.Tensor,
         demo_actions: torch.Tensor,
         demo_mask: torch.Tensor,
+        demo_geometry_sequence: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """返回每个 action token 的低秩算子因子，供正则和诊断使用。"""
         return self._encode_factors(
             demo_geometry,
             demo_actions,
             demo_mask.bool(),
+            demo_geometry_sequence,
         )
 
     def operator_frobenius_upper_bound(
@@ -192,12 +230,14 @@ class LowRankDemoActionTransport(nn.Module):
         demo_geometry: torch.Tensor,
         demo_actions: torch.Tensor,
         demo_mask: torch.Tensor,
+        demo_geometry_sequence: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """返回 ``||U||_F ||V||_F``，作为每个 token 的稳定性上界。"""
         left, right = self.transport_factors(
             demo_geometry,
             demo_actions,
             demo_mask,
+            demo_geometry_sequence,
         )
         return torch.linalg.matrix_norm(left) * torch.linalg.matrix_norm(right)
 
@@ -207,6 +247,7 @@ class LowRankDemoActionTransport(nn.Module):
         demo_geometry: torch.Tensor,
         demo_actions: torch.Tensor,
         demo_mask: torch.Tensor,
+        demo_geometry_sequence: torch.Tensor | None = None,
     ) -> torch.Tensor:
         valid = demo_mask.bool()
         mask = valid.float().unsqueeze(-1)
@@ -221,6 +262,7 @@ class LowRankDemoActionTransport(nn.Module):
             demo_geometry,
             demo_actions,
             valid,
+            demo_geometry_sequence,
         )
         latent = torch.einsum("btrg,bg->btr", right, delta)
         continuous = torch.einsum("btar,btr->bta", left, latent)
