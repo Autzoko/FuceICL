@@ -1,0 +1,32 @@
+{
+  "schema_version": "maniskill-pick-cube-action-grammar-heldout-v1",
+  "seeds": [
+    1643498841,
+    1248210412,
+    1988692010,
+    631440974,
+    1873072554,
+    1015035286,
+    1571904529,
+    2071610684,
+    292969154,
+    39309032,
+    1337178773,
+    1815849039,
+    1973196917,
+    1912528474,
+    1923838786,
+    568534198
+  ],
+  "policies": [
+    "phase_factorized_transport_h6",
+    "phase_factorized_transport_h6_grammar"
+  ],
+  "max_episode_steps": 100,
+  "minimum_label_points": 8,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "bootstrap_resamples": 10000,
+  "stop_on_truncation": false,
+  "phase_ridge_lambda": 0.001
+}
