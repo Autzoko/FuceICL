@@ -29,6 +29,7 @@ from dev.pointnet.compare_retrievers import (
 )
 from dev.pointnet.dataset import PointNetContextStore
 from dev.pointnet.evaluate_end_to_end_retriever import (
+    _base_candidate_mask,
     _load_text_scores,
     _text_candidate_masks,
 )
@@ -281,6 +282,109 @@ def _subset_selections(
             for name, values in selections.items()
         },
     )
+
+
+def _primary_selection_indices(
+    *,
+    records: Sequence[Mapping[str, Any]],
+    pair_rows: Sequence[Mapping[str, Any]],
+    action_masks: torch.Tensor,
+    retrieval_scores: torch.Tensor,
+    text_mask: torch.Tensor,
+) -> tuple[list[int], dict[str, list[tuple[int, int]]]]:
+    """选择主指标 query，不依赖 hard-negative 完整性。"""
+    id_to_index = {
+        str(record["chunk_id"]): index
+        for index, record in enumerate(records)
+    }
+    pairs = {str(row["query_id"]): row for row in pair_rows}
+    full = action_masks.all(dim=1)
+    eligible: list[int] = []
+    selections = {"oracle": [], "retrieved": []}
+    for query_index, record in enumerate(records):
+        if not bool(full[query_index]):
+            continue
+        pair = pairs.get(str(record["chunk_id"]))
+        if pair is None:
+            continue
+        positives = [
+            id_to_index[identifier]
+            for identifier in pair["positive_ids"]
+            if identifier in id_to_index
+            and bool(full[id_to_index[identifier]])
+        ]
+        if not positives:
+            continue
+        candidate_mask = (
+            _base_candidate_mask(records, query_index)
+            & text_mask[query_index]
+            & full
+        )
+        ranked = torch.argsort(
+            retrieval_scores[query_index].masked_fill(
+                ~candidate_mask,
+                float("-inf"),
+            ),
+            descending=True,
+            stable=True,
+        )
+        ranked = [
+            index for index in ranked.tolist() if bool(candidate_mask[index])
+        ]
+        if not ranked:
+            continue
+        eligible.append(query_index)
+        selections["oracle"].append((positives[0], positives[0]))
+        selections["retrieved"].append((ranked[0], ranked[0]))
+    if not eligible:
+        raise ValueError("没有满足主指标定义的 validation queries")
+    return eligible, selections
+
+
+@torch.inference_mode()
+def _evaluate_primary(
+    *,
+    models: Mapping[str, nn.Module],
+    geometries: torch.Tensor,
+    actions: torch.Tensor,
+    action_masks: torch.Tensor,
+    query_indices: Sequence[int],
+    selections: Mapping[str, Sequence[tuple[int, int]]],
+    device: torch.device,
+) -> dict[str, Any]:
+    """只评估预注册主对照，hard negatives 由独立子集审计。"""
+    queries = geometries[list(query_indices)]
+    targets = actions[list(query_indices)]
+    target_masks = action_masks[list(query_indices)]
+    all_models: dict[str, nn.Module | None] = {
+        "demo_action_copy": None,
+        **models,
+    }
+    report: dict[str, Any] = {}
+    for name, model in all_models.items():
+        report[name] = {}
+        for condition in ("retrieved", "oracle"):
+            demo_geometry, demo_actions, demo_mask = _condition_tensors(
+                selections[condition],
+                geometries,
+                actions,
+                action_masks,
+            )
+            prediction = (
+                demo_actions * demo_mask.float().unsqueeze(-1)
+                if model is None
+                else model(
+                    queries.to(device),
+                    demo_geometry.to(device),
+                    demo_actions.to(device),
+                    demo_mask.to(device),
+                ).cpu()
+            )
+            report[name][condition] = {
+                **_physical_metrics(prediction, targets, target_masks),
+                "valid_demo_step_fraction": float(demo_mask.float().mean()),
+            }
+    return report
 
 
 @torch.inference_mode()
@@ -677,7 +781,14 @@ def run(
         config.text_score_weight * normalized_text
         + (1.0 - config.text_score_weight) * pointnet_scores
     )
-    all_query_indices, all_selections = _selection_indices(
+    primary_query_indices, primary_selections = _primary_selection_indices(
+        records=context_stores["val"].records,
+        pair_rows=pair_rows["val"],
+        action_masks=action_masks["val"],
+        retrieval_scores=retrieval_scores,
+        text_mask=text_mask,
+    )
+    control_query_indices, control_selections = _selection_indices(
         records=context_stores["val"].records,
         pair_rows=pair_rows["val"],
         action_masks=action_masks["val"],
@@ -686,35 +797,74 @@ def run(
         seed=config.seed,
     )
     held_query_indices, held_selections = _subset_selections(
-        query_indices=all_query_indices,
-        selections=all_selections,
+        query_indices=primary_query_indices,
+        selections=primary_selections,
         records=context_stores["val"].records,
         tasks=held_out_tasks,
     )
     source_query_indices, source_selections = _subset_selections(
-        query_indices=all_query_indices,
-        selections=all_selections,
+        query_indices=primary_query_indices,
+        selections=primary_selections,
         records=context_stores["val"].records,
         tasks=source_tasks,
     )
-    held_metrics = evaluate_predictors(
+    observed_held_tasks = {
+        str(context_stores["val"].records[index]["task"])
+        for index in held_query_indices
+    }
+    if observed_held_tasks != held_out_tasks:
+        missing = sorted(held_out_tasks - observed_held_tasks)
+        raise ValueError(f"主指标未覆盖全部 held-out tasks：{missing}")
+    held_control_indices, held_control_selections = _subset_selections(
+        query_indices=control_query_indices,
+        selections=control_selections,
+        records=context_stores["val"].records,
+        tasks=held_out_tasks,
+    )
+    source_control_indices, source_control_selections = _subset_selections(
+        query_indices=control_query_indices,
+        selections=control_selections,
+        records=context_stores["val"].records,
+        tasks=source_tasks,
+    )
+    held_metrics = _evaluate_primary(
         models=models,
-        embeddings=geometries["val"],
+        geometries=geometries["val"],
         actions=actions["val"],
         action_masks=action_masks["val"],
         query_indices=held_query_indices,
         selections=held_selections,
         device=device,
     )
-    source_metrics = evaluate_predictors(
+    source_metrics = _evaluate_primary(
         models=models,
-        embeddings=geometries["val"],
+        geometries=geometries["val"],
         actions=actions["val"],
         action_masks=action_masks["val"],
         query_indices=source_query_indices,
         selections=source_selections,
         device=device,
     )
+    controlled_sensitivity = {
+        "held_out": evaluate_predictors(
+            models=models,
+            embeddings=geometries["val"],
+            actions=actions["val"],
+            action_masks=action_masks["val"],
+            query_indices=held_control_indices,
+            selections=held_control_selections,
+            device=device,
+        ),
+        "source": evaluate_predictors(
+            models=models,
+            embeddings=geometries["val"],
+            actions=actions["val"],
+            action_masks=action_masks["val"],
+            query_indices=source_control_indices,
+            selections=source_control_selections,
+            device=device,
+        ),
+    }
     per_task = {}
     for task in sorted(held_out_tasks):
         task_indices, task_selections = _subset_selections(
@@ -725,9 +875,9 @@ def run(
         )
         per_task[task] = {
             "eval_queries": len(task_indices),
-            "metrics": evaluate_predictors(
+            "metrics": _evaluate_primary(
                 models=models,
-                embeddings=geometries["val"],
+                geometries=geometries["val"],
                 actions=actions["val"],
                 action_masks=action_masks["val"],
                 query_indices=task_indices,
@@ -749,7 +899,7 @@ def run(
         device=device,
     )
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "protocol": {
             "split": "task-heldout model training; held-out task Demo at inference",
@@ -757,6 +907,12 @@ def run(
             "models": "translation-only fixed LR-DAT vs query-aligned LR-DAT",
             "checkpoint_selection": "fixed final epoch; validation unused",
             "bootstrap_unit": "task + variation + episode",
+            "primary_eligibility": (
+                "full action horizon + positive Demo + retrievable candidate"
+            ),
+            "hard_negative_eligibility": (
+                "separate diagnostic subset requiring every control type"
+            ),
         },
         "fold_name": fold_name,
         "held_out_tasks": sorted(held_out_tasks),
@@ -775,6 +931,8 @@ def run(
         "train_pairs": len(train_dataset),
         "held_out_eval_queries": len(held_query_indices),
         "source_eval_queries": len(source_query_indices),
+        "held_out_control_queries": len(held_control_indices),
+        "source_control_queries": len(source_control_indices),
         "model_parameters": {
             name: sum(parameter.numel() for parameter in model.parameters())
             for name, model in models.items()
@@ -805,6 +963,7 @@ def run(
         },
         "held_out_metrics": held_metrics,
         "source_metrics": source_metrics,
+        "controlled_sensitivity": controlled_sensitivity,
         "held_out_paired_bootstrap": _bootstrap_models(
             models=models,
             geometries=geometries["val"],
@@ -824,7 +983,7 @@ def run(
         encoding="utf-8",
     )
     temporary.joinpath("TRAINING_COMPLETE").write_text(
-        "rlbench_query_aligned_transport_task_heldout_v1\n",
+        "rlbench_query_aligned_transport_task_heldout_v2\n",
         encoding="utf-8",
     )
     temporary.rename(output_root)

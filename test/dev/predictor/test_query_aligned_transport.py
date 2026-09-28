@@ -7,6 +7,9 @@ import torch
 from dev.predictor.query_aligned_transport import (
     QueryAlignedLowRankDemoTransport,
 )
+from dev.predictor.train_query_aligned_transport import (
+    _primary_selection_indices,
+)
 
 
 def _inputs() -> tuple[torch.Tensor, ...]:
@@ -55,3 +58,34 @@ def test_rank_attention_and_parameter_budget() -> None:
     assert attention.shape == (4, 4, 6, 6)
     assert torch.allclose(attention.sum(dim=-1), torch.ones(4, 4, 6))
     assert sum(parameter.numel() for parameter in model.parameters()) < 1_000_000
+
+
+def test_primary_selection_does_not_require_hard_negatives() -> None:
+    records = [
+        {"chunk_id": "query", "task": "task", "episode": 0},
+        {"chunk_id": "demo", "task": "task", "episode": 1},
+    ]
+    pair_rows = [
+        {
+            "query_id": "query",
+            "positive_ids": ["demo"],
+            "hard_negatives": {},
+        }
+    ]
+    action_masks = torch.ones(2, 6, dtype=torch.bool)
+    scores = torch.tensor([[0.0, 0.9], [0.9, 0.0]])
+    text_mask = torch.ones(2, 2, dtype=torch.bool)
+
+    query_indices, selections = _primary_selection_indices(
+        records=records,
+        pair_rows=pair_rows,
+        action_masks=action_masks,
+        retrieval_scores=scores,
+        text_mask=text_mask,
+    )
+
+    assert query_indices == [0]
+    assert selections == {
+        "oracle": [(1, 1)],
+        "retrieved": [(1, 1)],
+    }
