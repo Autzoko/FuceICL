@@ -1,0 +1,23 @@
+{
+  "schema_version": "maniskill-codra-v1",
+  "seed": 20260929,
+  "alpha": 0.1,
+  "expected_calibration_episodes": 24,
+  "expected_test_episodes": 24,
+  "harm_tolerance": 1e-8,
+  "bootstrap_resamples": 10000,
+  "latency_iterations": 200,
+  "source_start_seeds": {
+    "PickCube-v1": 1000000,
+    "PushCube-v1": 2000000,
+    "PullCube-v1": 3000000
+  },
+  "excluded_source_seeds": [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    292998570, 415223522, 577192347, 806249560, 881441050,
+    783919980, 180979506, 100788075, 585460840, 299319560,
+    426766149, 690527740, 346764929, 717177130, 724376935,
+    619343080, 387627596, 213013673, 563617697, 684675476
+  ]
+}
