@@ -101,3 +101,18 @@ sbatch src/scripts/hpc/audit_maniskill_action_fidelity.slurm \
   /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.pointcloud.pd_ee_delta_pose.physx_cpu.json \
   /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_action_fidelity_source_aligned_v1.json
 ```
+
+若 action-fidelity 门槛失败，旧的 observation-delta chunks 只保留作 Retriever/表示研究。新的
+闭环数据先由 ManiSkill 官方 Panda motion-planning expert 采集成功 `pd_joint_pos` 轨迹，再在**不
+启用 env-state forcing**的条件下转换并重放为 `pointcloud + pd_ee_delta_pose`。脚本只接受 32/32
+metadata 与 terminal success：
+
+```bash
+sbatch src/scripts/hpc/collect_maniskill_executable_pickcube.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_executable_v1 \
+  32
+```
+
+通过基础审计后，仍须用 `audit_maniskill_action_fidelity.py` 抽查 raw controller action 直接 replay；
+达到 4/4 才允许从实际 controller actions 构造 Predictor labels。
