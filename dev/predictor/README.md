@@ -89,3 +89,17 @@ sbatch src/scripts/hpc/ablate_jacobian_transport.slurm \
   /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
   /scratch/ll5582/data/RLBench/training/jacobian_transport_ablation_v1
 ```
+
+Retriever score refusal 只能提供低覆盖的高置信通道时，固定已有 Retriever 与 LJAT，用来自不同
+episode 的 top-`1/2/4` Demo 产生动作假设，并比较均值、metric medoid 与 oracle-best 上界：
+
+```bash
+sbatch src/scripts/hpc/evaluate_demo_action_consensus.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/processed/action_chunk_pilot_v1 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/training/jacobian_transport_pilot_v1/local_jacobian_transport.pt \
+  /scratch/ll5582/data/RLBench/evaluation/demo_action_consensus_v1.json
+```
