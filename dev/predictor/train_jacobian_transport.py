@@ -31,7 +31,9 @@ from dev.pointnet.evaluate_end_to_end_retriever import (
 from dev.predictor.action_chunk_data import ActionChunkStore
 from dev.predictor.action_chunk_dataset import ActionChunkPairDataset
 from dev.predictor.canonical_geometry import (
+    FEATURE_GROUPS,
     FEATURE_NAMES,
+    geometry_feature_mask,
     geometry_statistics,
     load_canonical_geometries,
 )
@@ -116,6 +118,7 @@ def _seed_everything(seed: int) -> None:
 def _model_config(
     config: TrainConfig,
     horizon: int,
+    geometry_feature_mask: torch.Tensor | None = None,
 ) -> JacobianTransportConfig:
     return JacobianTransportConfig(
         horizon=horizon,
@@ -125,6 +128,11 @@ def _model_config(
         feedforward_dim=config.feedforward_dim,
         dropout=config.dropout,
         residual_limit=config.residual_limit,
+        geometry_mask=(
+            None
+            if geometry_feature_mask is None
+            else tuple(float(value) for value in geometry_feature_mask.tolist())
+        ),
     )
 
 
@@ -136,11 +144,16 @@ def train_model(
     config: TrainConfig,
     device: torch.device,
     log_path: Path,
+    geometry_feature_mask: torch.Tensor | None = None,
 ) -> LocalJacobianActionTransport:
     """训练单一假设模型，不用 validation 选择 checkpoint。"""
     _seed_everything(config.seed)
     model = LocalJacobianActionTransport(
-        _model_config(config, int(dataset.actions.shape[1])),
+        _model_config(
+            config,
+            int(dataset.actions.shape[1]),
+            geometry_feature_mask,
+        ),
         geometry_mean=geometry_mean,
         geometry_std=geometry_std,
     ).to(device)
@@ -209,6 +222,7 @@ def run(
     output_root: Path,
     config: TrainConfig,
     device: torch.device,
+    disabled_feature_groups: tuple[str, ...] = (),
 ) -> None:
     if output_root.exists():
         raise FileExistsError(f"输出目录已存在，拒绝覆盖：{output_root}")
@@ -233,6 +247,7 @@ def run(
         split: load_canonical_geometries(context_stores[split])
         for split in ("train", "val")
     }
+    feature_mask = geometry_feature_mask(disabled_feature_groups)
     geometry_mean, geometry_std = geometry_statistics(geometries["train"])
     loaded = {
         split: _load_action_tensors(context_stores[split], action_stores[split])
@@ -259,12 +274,15 @@ def run(
         config=config,
         device=device,
         log_path=temporary / "training_metrics.jsonl",
+        geometry_feature_mask=feature_mask,
     )
     checkpoint = {
         "model": model.state_dict(),
         "model_config": asdict(model.config),
         "train_config": asdict(config),
         "geometry_feature_names": FEATURE_NAMES,
+        "geometry_feature_mask": feature_mask,
+        "disabled_feature_groups": disabled_feature_groups,
         "context_summary_sha256": context_hash,
         "action_summary_sha256": action_hash,
         "retriever_checkpoint_sha256": _sha256(retriever_checkpoint),
@@ -327,6 +345,7 @@ def run(
             "hypothesis": "first-order transport from canonical geometry delta",
             "retrieved_demo": "text top-10 + PointNet reranking",
             "checkpoint_selection": "fixed final epoch",
+            "disabled_feature_groups": list(disabled_feature_groups),
         },
         "device": str(device),
         "cuda_name": (
@@ -342,6 +361,7 @@ def run(
         "eval_queries": len(query_indices),
         "model_parameters": sum(parameter.numel() for parameter in model.parameters()),
         "geometry_feature_names": FEATURE_NAMES,
+        "geometry_feature_mask": feature_mask.tolist(),
         "geometry_mean": geometry_mean.tolist(),
         "geometry_std": geometry_std.tolist(),
         "metrics": metrics,
@@ -368,6 +388,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument(
+        "--disable-feature-group",
+        action="append",
+        default=[],
+        choices=sorted(FEATURE_GROUPS),
+        help="将指定 canonical geometry 语义组固定到训练集均值",
+    )
     return parser.parse_args()
 
 
@@ -385,6 +412,7 @@ def main() -> None:
         output_root=args.output_root,
         config=TrainConfig.from_json(args.config),
         device=device,
+        disabled_feature_groups=tuple(args.disable_feature_group),
     )
 
 

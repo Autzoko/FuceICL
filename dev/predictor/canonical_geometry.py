@@ -31,6 +31,28 @@ FEATURE_NAMES = (
 )
 GEOMETRY_DIM = len(FEATURE_NAMES)
 
+FEATURE_GROUPS = {
+    "active_position": FEATURE_NAMES[0:3],
+    "target_layout": FEATURE_NAMES[3:6],
+    "object_shape": FEATURE_NAMES[6:12],
+}
+
+
+def geometry_feature_mask(disabled_groups: tuple[str, ...]) -> torch.Tensor:
+    """按语义组生成 17D mask，供机制消融使用。"""
+    unknown = sorted(set(disabled_groups) - FEATURE_GROUPS.keys())
+    if unknown:
+        raise ValueError(f"未知 geometry feature groups：{unknown}")
+    disabled = {
+        feature
+        for group in disabled_groups
+        for feature in FEATURE_GROUPS[group]
+    }
+    return torch.tensor(
+        [0.0 if feature in disabled else 1.0 for feature in FEATURE_NAMES],
+        dtype=torch.float32,
+    )
+
 
 def _rotation_from_6d(rotation_6d: torch.Tensor) -> torch.Tensor:
     """用 Gram-Schmidt 将矩阵前两列恢复成正交旋转矩阵。"""

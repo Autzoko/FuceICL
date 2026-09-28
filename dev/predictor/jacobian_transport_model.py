@@ -27,6 +27,7 @@ class JacobianTransportConfig:
     feedforward_dim: int = 256
     dropout: float = 0.1
     residual_limit: float = 2.0
+    geometry_mask: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         positive = (
@@ -46,6 +47,11 @@ class JacobianTransportConfig:
             raise ValueError("dropout 必须位于 [0, 1)")
         if self.residual_limit <= 0:
             raise ValueError("residual_limit 必须为正")
+        if self.geometry_mask is not None:
+            if len(self.geometry_mask) != self.geometry_dim:
+                raise ValueError("geometry_mask 长度必须等于 geometry_dim")
+            if any(value not in (0.0, 1.0) for value in self.geometry_mask):
+                raise ValueError("geometry_mask 只允许 0/1")
 
 
 class LocalJacobianActionTransport(nn.Module):
@@ -79,6 +85,16 @@ class LocalJacobianActionTransport(nn.Module):
             raise ValueError("geometry mean/std shape 错误")
         self.register_buffer("geometry_mean", mean)
         self.register_buffer("geometry_std", std.clamp_min(1e-4))
+        feature_mask = (
+            torch.ones(self.config.geometry_dim)
+            if self.config.geometry_mask is None
+            else torch.tensor(self.config.geometry_mask, dtype=torch.float32)
+        )
+        self.register_buffer(
+            "geometry_feature_mask",
+            feature_mask,
+            persistent=False,
+        )
         self.action_projection = nn.Linear(
             self.config.action_dim,
             self.config.hidden_dim,
@@ -125,8 +141,16 @@ class LocalJacobianActionTransport(nn.Module):
         valid = demo_mask.bool()
         mask = valid.float().unsqueeze(-1)
         global_valid = valid.any(dim=1, keepdim=True).float()
-        query = (query_geometry - self.geometry_mean) / self.geometry_std
-        demo = (demo_geometry - self.geometry_mean) / self.geometry_std
+        query = (
+            (query_geometry - self.geometry_mean)
+            / self.geometry_std
+            * self.geometry_feature_mask
+        )
+        demo = (
+            (demo_geometry - self.geometry_mean)
+            / self.geometry_std
+            * self.geometry_feature_mask
+        )
         demo = demo * global_valid
         delta = (query - demo) * global_valid
         tokens = (
