@@ -64,3 +64,14 @@ sbatch src/scripts/hpc/evaluate_maniskill_demo_prior.slurm \
   /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1 \
   /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_demo_prior_v1.json
 ```
+
+确认 Demo prior 显著优于 zero 后，按预注册配置训练 30 万参数级 Local Jacobian Action
+Transport。训练 pair 只允许跨 episode；validation 只从 train split 检索；固定使用末轮权重，
+不根据 validation 选择 checkpoint：
+
+```bash
+sbatch src/scripts/hpc/train_maniskill_local_transport.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/ManiSkill3/processed/pick_cube_chunks_v1 \
+  /scratch/ll5582/data/ManiSkill3/evaluation/pick_cube_ljat_v1
+```
