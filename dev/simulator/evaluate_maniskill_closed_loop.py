@@ -47,6 +47,7 @@ POLICIES = (
     "local_jacobian_transport",
     "factorized_transport",
 )
+SUPPORTED_POLICIES = frozenset((*POLICIES, "geometry_rank1_copy_h6"))
 
 
 @dataclass(frozen=True)
@@ -72,8 +73,15 @@ class ClosedLoopConfig:
             raise ValueError("schema_version 不能为空")
         if not self.seeds or len(set(self.seeds)) != len(self.seeds):
             raise ValueError("seeds 必须非空且不能重复")
-        if tuple(self.policies) != POLICIES:
-            raise ValueError(f"policies 必须固定为 {POLICIES}")
+        if (
+            not self.policies
+            or len(set(self.policies)) != len(self.policies)
+            or self.policies[0] != "zero_pose_hold_gripper"
+            or not set(self.policies).issubset(SUPPORTED_POLICIES)
+        ):
+            raise ValueError(
+                "policies 必须唯一、以 zero baseline 开头且属于支持集合"
+            )
         if min(
             self.max_episode_steps,
             self.minimum_label_points,
@@ -309,8 +317,42 @@ def _policy_action(
         "rotation_clipped": converted.rotation_clipped,
         "unscaled_translation_norm_m": converted.unscaled_translation_norm_m,
         "unscaled_rotation_norm_rad": converted.unscaled_rotation_norm_rad,
+        "replanned": True,
+        "plan_step": 0,
+        "plan_length": 1,
         "policy_latency_ms": latency_ms,
     }
+
+
+@torch.inference_mode()
+def _geometry_copy_chunk(
+    *,
+    context: ObservationContext,
+    train_geometry: torch.Tensor,
+    train_actions: torch.Tensor,
+    geometry_std: torch.Tensor,
+    pose_scales: torch.Tensor,
+    execution_horizon: int,
+    device: torch.device,
+) -> tuple[np.ndarray, int | None, float | None, bool]:
+    """检索一次并返回待连续执行的物理 action tokens。"""
+    if execution_horizon <= 0 or execution_horizon > train_actions.shape[1]:
+        raise ValueError("execution horizon 超出保存的 action chunk")
+    if context.geometry is None:
+        canonical = np.zeros((1, 7), dtype=np.float32)
+        canonical[0, 6] = _gripper_open(context.qpos)
+        return canonical, None, None, True
+    query = context.geometry.to(device)
+    distances = torch.linalg.vector_norm(
+        (train_geometry - query[None, :]) / geometry_std,
+        dim=1,
+    ) / math.sqrt(train_geometry.shape[1])
+    selected_index = int(distances.argmin())
+    normalized = train_actions[
+        selected_index : selected_index + 1, :execution_horizon
+    ]
+    canonical = _denormalize_actions(normalized, pose_scales)[0].cpu().numpy()
+    return canonical, selected_index, float(distances[selected_index].cpu()), False
 
 
 def _initial_signature(
@@ -350,6 +392,7 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "success_rate": float(np.mean(successes)),
         "success_step": _stats(success_steps),
         "executed_steps": len(steps),
+        "replans": sum(bool(step.get("replanned", True)) for step in steps),
         "refusals": sum(bool(step["refusal"]) for step in steps),
         "refusal_rate": float(np.mean([bool(step["refusal"]) for step in steps])),
         "translation_clip_rate": float(
@@ -499,6 +542,11 @@ def run(
             for seed in config.seeds:
                 observation, reset_info = environment.reset(seed=seed)
                 previous_tcp_pose: np.ndarray | None = None
+                buffered_actions: list[np.ndarray] = []
+                buffered_index: int | None = None
+                buffered_distance: float | None = None
+                buffered_plan_length = 0
+                buffered_plan_step = 0
                 step_records = []
                 success = _scalar_bool(reset_info.get("success", False))
                 success_step: int | None = 0 if success else None
@@ -528,18 +576,84 @@ def run(
                             raise ValueError(
                                 f"seed={seed} 跨 policy 初始状态差异 {difference:.4g}"
                             )
-                    action, action_record = _policy_action(
-                        policy=policy,
-                        context=context,
-                        train_records=train_records,
-                        train_geometry=train_geometry,
-                        train_actions=train_actions,
-                        geometry_std=geometry_std,
-                        model=model,
-                        pose_scales=pose_scales,
-                        config=config,
-                        device=device,
-                    )
+                    if policy == "geometry_rank1_copy_h6":
+                        _sync(device)
+                        policy_started = time.perf_counter()
+                        replanned = not buffered_actions
+                        refusal = False
+                        if replanned:
+                            (
+                                plan,
+                                buffered_index,
+                                buffered_distance,
+                                refusal,
+                            ) = _geometry_copy_chunk(
+                                context=context,
+                                train_geometry=train_geometry,
+                                train_actions=train_actions,
+                                geometry_std=geometry_std,
+                                pose_scales=pose_scales,
+                                execution_horizon=train_actions.shape[1],
+                                device=device,
+                            )
+                            buffered_actions = [token for token in plan]
+                            buffered_plan_length = len(buffered_actions)
+                            buffered_plan_step = 0
+                        canonical = buffered_actions.pop(0)
+                        converted = canonical_to_controller(
+                            canonical,
+                            context.tcp_pose,
+                            position_limit_m=config.position_limit_m,
+                            rotation_scale_rad=config.rotation_scale_rad,
+                        )
+                        _sync(device)
+                        action = converted.value
+                        action_record = {
+                            "refusal": refusal,
+                            "visible_points": context.visible_points,
+                            "selected_index": buffered_index,
+                            "selected_chunk_id": (
+                                None
+                                if buffered_index is None
+                                else str(
+                                    train_records[buffered_index]["chunk_id"]
+                                )
+                            ),
+                            "retrieval_distance": buffered_distance,
+                            "canonical_first_action": canonical.tolist(),
+                            "controller_action": action.tolist(),
+                            "translation_clipped": (
+                                converted.translation_clipped
+                            ),
+                            "rotation_clipped": converted.rotation_clipped,
+                            "unscaled_translation_norm_m": (
+                                converted.unscaled_translation_norm_m
+                            ),
+                            "unscaled_rotation_norm_rad": (
+                                converted.unscaled_rotation_norm_rad
+                            ),
+                            "replanned": replanned,
+                            "plan_step": buffered_plan_step,
+                            "plan_length": buffered_plan_length,
+                            "policy_latency_ms": (
+                                time.perf_counter() - policy_started
+                            )
+                            * 1000.0,
+                        }
+                        buffered_plan_step += 1
+                    else:
+                        action, action_record = _policy_action(
+                            policy=policy,
+                            context=context,
+                            train_records=train_records,
+                            train_geometry=train_geometry,
+                            train_actions=train_actions,
+                            geometry_std=geometry_std,
+                            model=model,
+                            pose_scales=pose_scales,
+                            config=config,
+                            device=device,
+                        )
                     action_record["preprocessing_latency_ms"] = (
                         preprocessing_latency_ms
                     )
@@ -614,8 +728,11 @@ def run(
         ("geometry_rank1_copy", "local_jacobian_transport"),
         ("local_jacobian_transport", "factorized_transport"),
         ("geometry_rank1_copy", "factorized_transport"),
+        ("geometry_rank1_copy", "geometry_rank1_copy_h6"),
     )
     for offset, (reference, candidate) in enumerate(pairs):
+        if reference not in successes or candidate not in successes:
+            continue
         comparisons[f"{candidate}_minus_{reference}"] = _paired_bootstrap(
             successes[reference],
             successes[candidate],
@@ -630,7 +747,10 @@ def run(
             "task": "PickCube-v1",
             "observation": "current pointcloud segmentation + TCP/goal/qpos",
             "retrieval": "standardized 17D geometry top-1 over train chunks",
-            "execution": "receding horizon; execute first token from H=6",
+            "execution": (
+                "policy-specific H=1 receding horizon or open-loop H=6; "
+                "controller conversion always uses the live TCP pose"
+            ),
             "text_stage": "not applicable in fixed single-task closed-loop pilot",
             "success": (
                 "first environment info.success within "
