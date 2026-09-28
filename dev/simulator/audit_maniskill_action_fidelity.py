@@ -27,6 +27,7 @@ from dev.simulator.evaluate_maniskill_closed_loop import (
 from dev.simulator.maniskill_action_bridge import (
     audit_round_trip,
     canonical_to_controller,
+    preprocess_normalized_controller_actions,
 )
 from dev.simulator.preprocess_maniskill_chunks import (
     _gripper_open,
@@ -151,17 +152,6 @@ def _ratio(numerator: np.ndarray, denominator: np.ndarray) -> list[float]:
     ).tolist()
 
 
-def _preprocess_raw_controller_actions(actions: np.ndarray) -> np.ndarray:
-    """复现 ManiSkill normalized controller 对 source action 的裁剪。"""
-    processed = np.asarray(actions, dtype=np.float64).copy()
-    processed[:, :3] = np.clip(processed[:, :3], -1.0, 1.0)
-    rotation_norm = np.linalg.norm(processed[:, 3:6], axis=1)
-    clipped = rotation_norm > 1.0
-    processed[clipped, 3:6] /= rotation_norm[clipped, None]
-    processed[:, 6] = np.clip(processed[:, 6], -1.0, 1.0)
-    return processed
-
-
 def _stats(values: Sequence[float]) -> dict[str, float | int] | None:
     if not values:
         return None
@@ -203,7 +193,7 @@ def _offline_command_audit(
         raw_gripper.append(gripper)
     observed = np.asarray(reconstructed, dtype=np.float64)
     raw_controller = np.asarray(raw, dtype=np.float64)
-    controller = _preprocess_raw_controller_actions(raw_controller)
+    controller = preprocess_normalized_controller_actions(raw_controller)
     return {
         "steps": limit,
         "raw_action_min": raw_controller.min(axis=0).tolist(),

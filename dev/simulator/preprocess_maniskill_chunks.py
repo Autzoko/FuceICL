@@ -495,7 +495,7 @@ def run(
             "geometry": "17D query-EEF canonical geometry",
             "action": (
                 "physical per-step EEF command inverted from executed "
-                "pd_ee_delta_pose actions"
+                "pd_ee_delta_pose actions after reproducing controller clipping"
                 if config.action_representation
                 == "canonical_controller_command"
                 else "cumulative query-EEF [translation, axis-angle, gripper_open]"
@@ -552,7 +552,30 @@ def run(
                 segmentation = trajectory["obs/pointcloud/segmentation"]
                 tcp_poses = np.asarray(trajectory["obs/extra/tcp_pose"])
                 qpos = np.asarray(trajectory["obs/agent/qpos"])
-                controller_actions = np.asarray(trajectory["actions"])
+                raw_controller_actions = np.asarray(trajectory["actions"])
+                from dev.simulator.maniskill_action_bridge import (
+                    preprocess_normalized_controller_actions,
+                )
+
+                controller_actions = preprocess_normalized_controller_actions(
+                    raw_controller_actions
+                )
+                controller_difference = np.abs(
+                    controller_actions - raw_controller_actions
+                )
+                controller_preprocessing = {
+                    "changed_steps": int(
+                        np.any(controller_difference > 1e-7, axis=1).sum()
+                    ),
+                    "maximum_absolute_change": float(
+                        controller_difference.max(initial=0.0)
+                    ),
+                    "raw_rotation_norm_max": float(
+                        np.linalg.norm(
+                            raw_controller_actions[:, 3:6], axis=1
+                        ).max(initial=0.0)
+                    ),
+                }
                 actor_path = f"env_states/actors/{config.active_actor_name}"
                 if actor_path not in trajectory:
                     raise KeyError(f"{key} 缺少 active actor path：{actor_path}")
@@ -745,6 +768,7 @@ def run(
                         "centroid_error_max_m": max(frame_errors),
                         "active_label_inference": active_label_diagnostic,
                         "target_label_inference": target_label_diagnostic,
+                        "controller_action_preprocessing": controller_preprocessing,
                         "target_point_count_min": (
                             min(target_frame_point_counts)
                             if target_frame_point_counts

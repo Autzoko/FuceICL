@@ -29,6 +29,21 @@ class ControllerAction:
     unscaled_rotation_norm_rad: float
 
 
+def preprocess_normalized_controller_actions(actions: np.ndarray) -> np.ndarray:
+    """复现 ManiSkill 对归一化 action 的逐维及旋转范数裁剪。"""
+    processed = np.asarray(actions, dtype=np.float64).copy()
+    if processed.ndim != 2 or processed.shape[1] != 7:
+        raise ValueError("normalized controller actions 必须为 [T,7]")
+    if not np.isfinite(processed).all():
+        raise ValueError("normalized controller actions 含 NaN 或 Inf")
+    processed[:, :3] = np.clip(processed[:, :3], -1.0, 1.0)
+    rotation_norm = np.linalg.norm(processed[:, 3:6], axis=1)
+    clipped = rotation_norm > 1.0
+    processed[clipped, 3:6] /= rotation_norm[clipped, None]
+    processed[:, 6] = np.clip(processed[:, 6], -1.0, 1.0)
+    return processed
+
+
 def _rotation_tensor(value: np.ndarray) -> torch.Tensor:
     return torch.as_tensor(value, dtype=torch.float64)
 
@@ -69,7 +84,8 @@ def canonical_to_controller(
     translation_normalized = np.clip(translation_normalized, -1.0, 1.0)
     if rotation_clipped:
         rotation_normalized = rotation_normalized / rotation_norm
-    gripper = 1.0 if action[6] >= 0.5 else -1.0
+    # canonical gripper 使用 [0,1]，线性映射可保留 motion planner 的连续命令。
+    gripper = float(np.clip(2.0 * action[6] - 1.0, -1.0, 1.0))
     controller = np.concatenate(
         (translation_normalized, rotation_normalized, [gripper])
     ).astype(np.float32)
@@ -101,7 +117,7 @@ def controller_to_canonical_unclipped(
     body_translation = current_rotation.T.numpy() @ root_translation
     body_delta = current_rotation.T @ root_delta @ current_rotation
     body_axis_angle = matrix_to_axis_angle(body_delta).numpy()
-    gripper = 1.0 if action[6] >= 0.0 else 0.0
+    gripper = float(np.clip((action[6] + 1.0) / 2.0, 0.0, 1.0))
     return np.concatenate((body_translation, body_axis_angle, [gripper])).astype(
         np.float32
     )
