@@ -114,3 +114,18 @@ sbatch src/scripts/hpc/evaluate_end_to_end_retriever.slurm \
   /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
   /scratch/ll5582/data/RLBench/evaluation/retriever_e2e_v1.json
 ```
+
+## 选择性检索与拒绝
+
+`evaluate_selective_retrieval.py` 按 episode 划分 calibration/test，只用已有文本和 PointNet
+分数构造置信特征。阈值在 calibration 上选择，test 报告 precision–coverage、correct recall
+和 episode-block bootstrap；该实验不增加新的视觉或文本模型前向。
+
+```bash
+sbatch src/scripts/hpc/evaluate_selective_retrieval.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/evaluation/retriever_reliability_v1.json
+```
