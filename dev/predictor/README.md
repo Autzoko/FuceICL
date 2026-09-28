@@ -103,3 +103,17 @@ sbatch src/scripts/hpc/evaluate_demo_action_consensus.slurm \
   /scratch/ll5582/data/RLBench/training/jacobian_transport_pilot_v1/local_jacobian_transport.pt \
   /scratch/ll5582/data/RLBench/evaluation/demo_action_consensus_v1.json
 ```
+
+若 oracle-best-in-4 明显优于无训练聚合，则冻结候选与 LJAT，用 train future action error 监督
+一个约 20k 参数的 permutation-equivariant utility selector；validation future 不参与训练：
+
+```bash
+sbatch src/scripts/hpc/train_demo_utility_selector.slurm \
+  "$PWD" \
+  /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
+  /scratch/ll5582/data/RLBench/processed/action_chunk_pilot_v1 \
+  /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
+  /scratch/ll5582/data/RLBench/training/jacobian_transport_pilot_v1/local_jacobian_transport.pt \
+  /scratch/ll5582/data/RLBench/training/demo_utility_selector_v1
+```
