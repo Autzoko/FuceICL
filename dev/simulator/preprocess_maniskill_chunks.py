@@ -467,6 +467,12 @@ def run(
     temporary.mkdir(parents=True)
     temporary.joinpath("shards").mkdir()
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    source_episodes = {
+        int(record["episode_id"]): record
+        for record in metadata.get("episodes", [])
+    }
+    if len(source_episodes) != len(metadata.get("episodes", [])):
+        raise ValueError("source metadata episode_id 重复")
     source_task = str(metadata.get("env_info", {}).get("env_id", ""))
     if source_task and source_task != config.task_id:
         raise ValueError(
@@ -534,6 +540,14 @@ def run(
             diagnostics = {split: [] for split in writers}
             for key in keys:
                 trajectory = handle[key]
+                episode = int(key.split("_")[1])
+                if episode not in source_episodes:
+                    raise ValueError(f"{key} 在 source metadata 中缺失")
+                source_episode = source_episodes[episode]
+                source_seed_value = source_episode.get("episode_seed")
+                if source_seed_value is None:
+                    source_seed_value = source_episode["reset_kwargs"]["seed"]
+                source_episode_seed = int(source_seed_value)
                 xyzw = trajectory["obs/pointcloud/xyzw"]
                 segmentation = trajectory["obs/pointcloud/segmentation"]
                 tcp_poses = np.asarray(trajectory["obs/extra/tcp_pose"])
@@ -698,7 +712,8 @@ def run(
                             "chunk_id": identifier,
                             "split": split,
                             "task": config.task_id,
-                            "episode": int(key.split("_")[1]),
+                            "episode": episode,
+                            "source_episode_seed": source_episode_seed,
                             "frame": frame,
                             "active_label": active_label,
                             "active_point_count": len(points),
@@ -720,6 +735,7 @@ def run(
                 diagnostics[split].append(
                     {
                         "trajectory": key,
+                        "source_episode_seed": source_episode_seed,
                         "active_label": active_label,
                         "target_label": target_label,
                         "chunks": len(frame_errors),

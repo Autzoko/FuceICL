@@ -62,6 +62,7 @@ def run(root: Path, output_path: Path) -> None:
 
     split_reports: dict[str, Any] = {}
     split_episodes: dict[str, set[int]] = {}
+    split_source_seeds: dict[str, set[int] | None] = {}
     for split in ("train", "val"):
         manifest_path = root / f"manifest-{split}.jsonl"
         records = _read_jsonl(manifest_path)
@@ -69,6 +70,25 @@ def run(root: Path, output_path: Path) -> None:
         if len(set(identifiers)) != len(identifiers):
             raise ValueError(f"{split} manifest 存在重复 chunk_id")
         split_episodes[split] = {int(record["episode"]) for record in records}
+        source_seed_presence = [
+            "source_episode_seed" in record for record in records
+        ]
+        if any(source_seed_presence) and not all(source_seed_presence):
+            raise ValueError(f"{split} manifest 仅部分记录 source seed")
+        if all(source_seed_presence):
+            by_episode: dict[int, set[int]] = defaultdict(set)
+            for record in records:
+                by_episode[int(record["episode"])].add(
+                    int(record["source_episode_seed"])
+                )
+            if any(len(values) != 1 for values in by_episode.values()):
+                raise ValueError(f"{split} episode 映射到多个 source seeds")
+            seeds = {next(iter(values)) for values in by_episode.values()}
+            if len(seeds) != len(by_episode):
+                raise ValueError(f"{split} source episode seed 重复")
+            split_source_seeds[split] = seeds
+        else:
+            split_source_seeds[split] = None
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in records:
             if record["split"] != split:
@@ -198,6 +218,11 @@ def run(root: Path, output_path: Path) -> None:
         split_reports[split] = {
             "chunks": len(records),
             "episodes": len(split_episodes[split]),
+            "source_episode_seeds": (
+                None
+                if split_source_seeds[split] is None
+                else sorted(split_source_seeds[split] or set())
+            ),
             "manifest_sha256": _sha256(manifest_path),
             "shards": len(grouped),
             "active_points_dtype": str(arrays["active_points"].dtype),
@@ -211,6 +236,15 @@ def run(root: Path, output_path: Path) -> None:
     overlap = split_episodes["train"] & split_episodes["val"]
     if overlap:
         raise ValueError(f"episode 跨 train/val：{sorted(overlap)}")
+    source_seed_overlap: set[int] = set()
+    if all(value is not None for value in split_source_seeds.values()):
+        source_seed_overlap = (split_source_seeds["train"] or set()) & (
+            split_source_seeds["val"] or set()
+        )
+        if source_seed_overlap:
+            raise ValueError(
+                f"source seed 跨 train/val：{sorted(source_seed_overlap)}"
+            )
     report = {
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -221,6 +255,7 @@ def run(root: Path, output_path: Path) -> None:
         "privileged_state_in_shards": False,
         "action_representation": action_representation,
         "episode_overlap": [],
+        "source_episode_seed_overlap": sorted(source_seed_overlap),
         "splits": split_reports,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)

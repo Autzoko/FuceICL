@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --time=00:10:00
+#SBATCH --time=00:30:00
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
@@ -17,6 +17,7 @@ readonly PROJECT_ROOT="${1:?project root is required}"
 readonly OUTPUT_ROOT="${2:?new task output root is required}"
 readonly ENV_ID="${3:?ManiSkill env id is required}"
 readonly NUM_TRAJECTORIES="${4:-32}"
+readonly START_SEED="${5:-0}"
 readonly ENV_NAME="FuseICL-maniskill"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 readonly SOURCE_DIR="${OUTPUT_ROOT}/${ENV_ID}/motionplanning"
@@ -32,6 +33,10 @@ if [[ -e "${OUTPUT_ROOT}" ]]; then
 fi
 if [[ ! "${NUM_TRAJECTORIES}" =~ ^[1-9][0-9]*$ ]]; then
     echo "NUM_TRAJECTORIES 必须为正整数" >&2
+    exit 2
+fi
+if [[ ! "${START_SEED}" =~ ^[0-9]+$ ]]; then
+    echo "START_SEED 必须为非负整数" >&2
     exit 2
 fi
 if [[ ! "${ENV_ID}" =~ ^[A-Za-z0-9_-]+$ ]]; then
@@ -58,14 +63,13 @@ cd "${PROJECT_ROOT}"
 
 # 只保存 motion planner 成功轨迹；仿真真值不进入最终 retrieval key。
 conda run --no-capture-output -n "${ENV_NAME}" \
-    python -m mani_skill.examples.motionplanning.panda.run \
+    python -m dev.simulator.generate_maniskill_motionplanning \
     --env-id "${ENV_ID}" \
-    --obs-mode none \
-    --num-traj "${NUM_TRAJECTORIES}" \
-    --only-count-success \
+    --output-root "${OUTPUT_ROOT}" \
+    --num-trajectories "${NUM_TRAJECTORIES}" \
+    --start-seed "${START_SEED}" \
     --sim-backend physx_cpu \
-    --traj-name trajectory \
-    --record-dir "${OUTPUT_ROOT}"
+    --trajectory-name trajectory
 
 test -s "${SOURCE_H5}"
 test -s "${SOURCE_JSON}"
