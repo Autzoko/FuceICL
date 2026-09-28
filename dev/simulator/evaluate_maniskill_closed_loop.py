@@ -34,6 +34,11 @@ from dev.simulator.evaluate_maniskill_demo_prior import (
     _action_protocol,
     _load_split,
 )
+from dev.simulator.evaluate_in_context_local_policy import (
+    _bounded_correction,
+    _demo_radius_gate,
+    _fit_local_translation_operator,
+)
 from dev.simulator.maniskill_action_bridge import (
     audit_round_trip,
     canonical_to_controller,
@@ -50,6 +55,9 @@ from dev.simulator.preprocess_maniskill_chunks import (
     _canonical_geometry,
     _gripper_open,
 )
+from dev.simulator.train_maniskill_low_rank_transport import (
+    _load_geometry_sequence,
+)
 
 
 POLICIES = (
@@ -64,6 +72,7 @@ CHUNK_POLICIES = frozenset(
         "phase_matched_copy_h6",
         "phase_factorized_transport_h6",
         "phase_factorized_transport_h6_grammar",
+        "in_context_local_policy_h6",
     )
 )
 SUPPORTED_POLICIES = frozenset((*POLICIES, *CHUNK_POLICIES))
@@ -83,6 +92,10 @@ class ClosedLoopConfig:
     bootstrap_resamples: int
     stop_on_truncation: bool = True
     phase_ridge_lambda: float = 0.001
+    in_context_ridge_lambda: float = 0.1
+    in_context_position_scale_m: float = 0.1
+    in_context_correction_limit_normalized: float = 0.25
+    in_context_minimum_demo_radius_normalized: float = 0.05
 
     @classmethod
     def from_json(cls, path: Path) -> "ClosedLoopConfig":
@@ -111,6 +124,14 @@ class ClosedLoopConfig:
             raise ValueError("controller scale 非法")
         if self.phase_ridge_lambda <= 0:
             raise ValueError("phase ridge lambda 必须为正")
+        in_context_parameters = (
+            self.in_context_ridge_lambda,
+            self.in_context_position_scale_m,
+            self.in_context_correction_limit_normalized,
+            self.in_context_minimum_demo_radius_normalized,
+        )
+        if min(in_context_parameters) <= 0:
+            raise ValueError("IC-LPI 参数必须为正")
 
 
 @dataclass(frozen=True)
@@ -452,6 +473,117 @@ def _phase_matched_chunk(
     )
 
 
+@torch.inference_mode()
+def _in_context_local_policy_chunk(
+    *,
+    context: ObservationContext,
+    train_geometry: torch.Tensor,
+    train_actions: torch.Tensor,
+    train_geometry_sequence: torch.Tensor,
+    train_phase: torch.Tensor,
+    geometry_std: torch.Tensor,
+    pose_scales: torch.Tensor,
+    execution_horizon: int,
+    config: ClosedLoopConfig,
+    device: torch.device,
+) -> tuple[
+    np.ndarray,
+    int | None,
+    float | None,
+    bool,
+    int | None,
+    dict[str, Any] | None,
+]:
+    """从 rank-1 Demo 内部 transition 现场辨识 translation 修正。"""
+    if execution_horizon != train_actions.shape[1]:
+        raise ValueError("IC-LPI 当前要求执行完整 Demo horizon")
+    if train_geometry_sequence.shape[:2] != (
+        len(train_actions),
+        execution_horizon + 1,
+    ):
+        raise ValueError("IC-LPI geometry sequence 与 action bank 不匹配")
+    if context.geometry is None:
+        canonical = np.zeros((1, 7), dtype=np.float32)
+        canonical[0, 6] = _gripper_open(context.qpos)
+        return canonical, None, None, True, None, None
+
+    query = context.geometry.to(device)
+    query_phase = phase_ids(query[None])
+    distances = torch.linalg.vector_norm(
+        (train_geometry - query[None]) / geometry_std,
+        dim=1,
+    ) / math.sqrt(train_geometry.shape[1])
+    selected_index = int(
+        phase_matched_nearest(
+            distances=distances[None],
+            query_phase=query_phase,
+            candidate_phase=train_phase,
+        )[0]
+    )
+    demo_actions = train_actions[selected_index : selected_index + 1]
+    demo_sequence = train_geometry_sequence[
+        selected_index : selected_index + 1
+    ]
+    operator, condition_number = _fit_local_translation_operator(
+        demo_sequence,
+        demo_actions,
+        position_scale_m=config.in_context_position_scale_m,
+        ridge_lambda=config.in_context_ridge_lambda,
+    )
+    correction, raw_norm, correction_clipped = _bounded_correction(
+        query[None],
+        demo_sequence,
+        operator,
+        position_scale_m=config.in_context_position_scale_m,
+        correction_limit=config.in_context_correction_limit_normalized,
+    )
+    transported = demo_actions.clone()
+    unconstrained = transported[..., :3] + correction[:, None]
+    transported[..., :3] = unconstrained.clamp(-1.0, 1.0)
+    action_clipped = unconstrained != transported[..., :3]
+    accepted, query_distance, demo_radius = _demo_radius_gate(
+        query[None],
+        demo_sequence,
+        position_scale_m=config.in_context_position_scale_m,
+        minimum_radius=config.in_context_minimum_demo_radius_normalized,
+    )
+    prediction = torch.where(
+        accepted[:, None, None],
+        transported,
+        demo_actions,
+    )
+    applied_correction_norm = torch.where(
+        accepted,
+        torch.linalg.vector_norm(correction, dim=1),
+        torch.zeros_like(raw_norm),
+    )
+    canonical = _denormalize_actions(
+        prediction[:, :execution_horizon],
+        pose_scales,
+    )[0].cpu().numpy()
+    diagnostics: dict[str, Any] = {
+        "translation_components_clipped": (
+            int(action_clipped.sum()) if bool(accepted[0]) else 0
+        ),
+        "translation_components_total": int(action_clipped.numel()),
+        "support_accepted": bool(accepted[0]),
+        "query_demo_distance": float(query_distance[0]),
+        "demo_path_radius": float(demo_radius[0]),
+        "correction_l2_raw": float(raw_norm[0]),
+        "correction_l2_bounded": float(applied_correction_norm[0]),
+        "correction_l2_clipped": bool(correction_clipped[0]),
+        "regularized_gram_condition_number": float(condition_number[0]),
+    }
+    return (
+        canonical,
+        selected_index,
+        float(distances[selected_index].cpu()),
+        False,
+        int(query_phase[0]),
+        diagnostics,
+    )
+
+
 def _initial_signature(
     observation: Mapping[str, Any], context: ObservationContext
 ) -> np.ndarray:
@@ -477,6 +609,11 @@ def _stats(values: Sequence[float]) -> dict[str, float | int] | None:
 
 def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     steps = [step for record in records for step in record["step_records"]]
+    in_context_replans = [
+        step
+        for step in steps
+        if step.get("in_context_support_accepted") is not None
+    ]
     successes = [bool(record["success"]) for record in records]
     initial_successes = [
         bool(record.get("initial_success", False)) for record in records
@@ -609,6 +746,43 @@ def _summarize_policy(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         ),
         "executed_steps": len(steps),
         "replans": sum(bool(step.get("replanned", True)) for step in steps),
+        "in_context_support": {
+            "replans": len(in_context_replans),
+            "accepted": sum(
+                bool(step["in_context_support_accepted"])
+                for step in in_context_replans
+            ),
+            "acceptance_rate": (
+                float(
+                    np.mean(
+                        [
+                            bool(step["in_context_support_accepted"])
+                            for step in in_context_replans
+                        ]
+                    )
+                )
+                if in_context_replans
+                else None
+            ),
+            "query_demo_distance": _stats(
+                [
+                    float(step["in_context_query_demo_distance"])
+                    for step in in_context_replans
+                ]
+            ),
+            "demo_path_radius": _stats(
+                [
+                    float(step["in_context_demo_path_radius"])
+                    for step in in_context_replans
+                ]
+            ),
+            "bounded_correction_l2": _stats(
+                [
+                    float(step["in_context_correction_l2_bounded"])
+                    for step in in_context_replans
+                ]
+            ),
+        },
         "refusals": sum(bool(step["refusal"]) for step in steps),
         "refusal_rate": float(np.mean([bool(step["refusal"]) for step in steps])),
         "translation_clip_rate": float(
@@ -738,6 +912,18 @@ def run(
     train_records, train_geometry_cpu, train_actions_cpu = _load_split(
         data_root, "train", pose_scales
     )
+    requires_in_context = "in_context_local_policy_h6" in config.policies
+    if requires_in_context and not math.isclose(
+        config.in_context_position_scale_m,
+        float(pose_scales[0]),
+        abs_tol=1e-8,
+    ):
+        raise ValueError("IC-LPI position scale 与 action protocol 不一致")
+    train_geometry_sequence_cpu = (
+        _load_geometry_sequence(data_root, train_records)
+        if requires_in_context
+        else None
+    )
     active_label = _active_label(train_records)
     computed_mean = train_geometry_cpu.mean(dim=0)
     computed_std = train_geometry_cpu.std(dim=0, unbiased=False).clamp_min(1e-4)
@@ -831,6 +1017,11 @@ def run(
         )
     train_geometry = train_geometry_cpu.to(device)
     train_actions = train_actions_cpu.to(device)
+    train_geometry_sequence = (
+        train_geometry_sequence_cpu.to(device)
+        if train_geometry_sequence_cpu is not None
+        else None
+    )
     train_phase = train_phase_cpu.to(device)
     phase_weights = phase_weights_cpu.to(device)
     geometry_std = geometry_std.to(device)
@@ -867,7 +1058,7 @@ def run(
                 buffered_plan_length = 0
                 buffered_plan_step = 0
                 buffered_phase: int | None = None
-                buffered_transport_diagnostics: dict[str, float | int] | None = None
+                buffered_transport_diagnostics: dict[str, Any] | None = None
                 grammar_phase_index = 0
                 step_records = []
                 success = _scalar_bool(reset_info.get("success", False))
@@ -930,6 +1121,30 @@ def run(
                                     geometry_std=geometry_std,
                                     pose_scales=pose_scales,
                                     execution_horizon=train_actions.shape[1],
+                                    device=device,
+                                )
+                            elif policy == "in_context_local_policy_h6":
+                                if train_geometry_sequence is None:
+                                    raise RuntimeError(
+                                        "IC-LPI 缺少 geometry sequence"
+                                    )
+                                (
+                                    plan,
+                                    buffered_index,
+                                    buffered_distance,
+                                    refusal,
+                                    buffered_phase,
+                                    buffered_transport_diagnostics,
+                                ) = _in_context_local_policy_chunk(
+                                    context=context,
+                                    train_geometry=train_geometry,
+                                    train_actions=train_actions,
+                                    train_geometry_sequence=train_geometry_sequence,
+                                    train_phase=train_phase,
+                                    geometry_std=geometry_std,
+                                    pose_scales=pose_scales,
+                                    execution_horizon=train_actions.shape[1],
+                                    config=config,
                                     device=device,
                                 )
                             else:
@@ -1041,6 +1256,38 @@ def run(
                                 if replanned
                                 and buffered_transport_diagnostics is not None
                                 else 0
+                            ),
+                            "in_context_support_accepted": (
+                                buffered_transport_diagnostics.get(
+                                    "support_accepted"
+                                )
+                                if replanned
+                                and buffered_transport_diagnostics is not None
+                                else None
+                            ),
+                            "in_context_query_demo_distance": (
+                                buffered_transport_diagnostics.get(
+                                    "query_demo_distance"
+                                )
+                                if replanned
+                                and buffered_transport_diagnostics is not None
+                                else None
+                            ),
+                            "in_context_demo_path_radius": (
+                                buffered_transport_diagnostics.get(
+                                    "demo_path_radius"
+                                )
+                                if replanned
+                                and buffered_transport_diagnostics is not None
+                                else None
+                            ),
+                            "in_context_correction_l2_bounded": (
+                                buffered_transport_diagnostics.get(
+                                    "correction_l2_bounded"
+                                )
+                                if replanned
+                                and buffered_transport_diagnostics is not None
+                                else None
                             ),
                             "policy_latency_ms": (
                                 time.perf_counter() - policy_started
@@ -1166,6 +1413,8 @@ def run(
         ("geometry_rank1_copy", "geometry_rank1_copy_h6"),
         ("geometry_rank1_copy_h6", "phase_matched_copy_h6"),
         ("phase_matched_copy_h6", "phase_factorized_transport_h6"),
+        ("phase_matched_copy_h6", "in_context_local_policy_h6"),
+        ("phase_factorized_transport_h6", "in_context_local_policy_h6"),
         ("geometry_rank1_copy_h6", "phase_factorized_transport_h6"),
         (
             "phase_factorized_transport_h6",
@@ -1237,6 +1486,23 @@ def run(
         ),
         "config_sha256": _sha256(config_path),
         "phase_transport_fit": phase_fit,
+        "in_context_local_policy": (
+            {
+                "model_parameters": 0,
+                "ridge_lambda": config.in_context_ridge_lambda,
+                "position_scale_m": config.in_context_position_scale_m,
+                "correction_limit_normalized": (
+                    config.in_context_correction_limit_normalized
+                ),
+                "minimum_demo_radius_normalized": (
+                    config.in_context_minimum_demo_radius_normalized
+                ),
+                "support_fallback": "strict Demo copy",
+                "demo_context": "observed H+1 geometry and H actions",
+            }
+            if requires_in_context
+            else None
+        ),
         "action_grammar": (
             None if action_grammar is None else action_grammar.to_dict()
         ),

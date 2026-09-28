@@ -1,0 +1,41 @@
+{
+  "schema_version": "maniskill-pick-cube-ic-lpi-closed-loop-v1",
+  "seeds": [
+    314159265,
+    271828182,
+    161803398,
+    141421356,
+    173205080,
+    223606797,
+    244948974,
+    264575131,
+    316227766,
+    331662479,
+    346410161,
+    360555127,
+    374165738,
+    387298334,
+    412310562,
+    424264068,
+    435889894,
+    447213595,
+    458257569,
+    469041575
+  ],
+  "policies": [
+    "phase_matched_copy_h6",
+    "phase_factorized_transport_h6",
+    "in_context_local_policy_h6"
+  ],
+  "max_episode_steps": 100,
+  "minimum_label_points": 8,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "bootstrap_resamples": 10000,
+  "stop_on_truncation": false,
+  "phase_ridge_lambda": 0.001,
+  "in_context_ridge_lambda": 0.1,
+  "in_context_position_scale_m": 0.1,
+  "in_context_correction_limit_normalized": 0.25,
+  "in_context_minimum_demo_radius_normalized": 0.05
+}
