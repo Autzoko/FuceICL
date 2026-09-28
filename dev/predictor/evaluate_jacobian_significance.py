@@ -76,13 +76,19 @@ def _per_query_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
     mask: torch.Tensor,
+    *,
+    pose_scales: torch.Tensor | Sequence[float] | None = None,
+    translation_threshold_m: float = 0.05,
+    rotation_threshold_rad: float = 0.25,
 ) -> dict[str, np.ndarray]:
     """返回 full-horizon query 级指标，供 episode block bootstrap 使用。"""
+    if min(translation_threshold_m, rotation_threshold_rad) <= 0:
+        raise ValueError("action threshold 必须为正")
     weights = mask.float()
     denominator = weights.sum(dim=1).clamp_min(1.0)
     normalized_error = (prediction - target).abs().mean(dim=-1)
-    prediction_physical = _denormalize_actions(prediction)
-    target_physical = _denormalize_actions(target)
+    prediction_physical = _denormalize_actions(prediction, pose_scales)
+    target_physical = _denormalize_actions(target, pose_scales)
     translation = torch.linalg.vector_norm(
         prediction_physical[..., :3] - target_physical[..., :3], dim=-1
     )
@@ -94,7 +100,9 @@ def _per_query_metrics(
         == (target_physical[..., 6] >= 0.5)
     )
     step_success = (
-        (translation < 0.05) & (rotation < 0.25) & gripper_correct
+        (translation < translation_threshold_m)
+        & (rotation < rotation_threshold_rad)
+        & gripper_correct
     )
 
     def masked_query_mean(values: torch.Tensor) -> np.ndarray:

@@ -131,24 +131,32 @@ def _seed_everything(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def _normalize_actions(actions: torch.Tensor) -> torch.Tensor:
+def _pose_scale_tensor(
+    actions: torch.Tensor,
+    pose_scales: torch.Tensor | Sequence[float] | None,
+) -> torch.Tensor:
+    values = POSE_SCALES if pose_scales is None else torch.as_tensor(pose_scales)
+    if values.shape != (6,) or not bool(torch.all(values > 0)):
+        raise ValueError("action pose scales 必须是 6 个正数")
+    return values.to(device=actions.device, dtype=actions.dtype)
+
+
+def _normalize_actions(
+    actions: torch.Tensor,
+    pose_scales: torch.Tensor | Sequence[float] | None = None,
+) -> torch.Tensor:
     normalized = actions.clone().float()
-    pose_scales = POSE_SCALES.to(
-        device=normalized.device,
-        dtype=normalized.dtype,
-    )
-    normalized[..., :6] /= pose_scales
+    normalized[..., :6] /= _pose_scale_tensor(normalized, pose_scales)
     normalized[..., 6] = 2.0 * normalized[..., 6] - 1.0
     return normalized
 
 
-def _denormalize_actions(actions: torch.Tensor) -> torch.Tensor:
+def _denormalize_actions(
+    actions: torch.Tensor,
+    pose_scales: torch.Tensor | Sequence[float] | None = None,
+) -> torch.Tensor:
     physical = actions.clone().float()
-    pose_scales = POSE_SCALES.to(
-        device=physical.device,
-        dtype=physical.dtype,
-    )
-    physical[..., :6] *= pose_scales
+    physical[..., :6] *= _pose_scale_tensor(physical, pose_scales)
     physical[..., 6] = ((physical[..., 6] + 1.0) * 0.5).clamp(0.0, 1.0)
     return physical
 
@@ -421,10 +429,16 @@ def _physical_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
     target_mask: torch.Tensor,
+    *,
+    pose_scales: torch.Tensor | Sequence[float] | None = None,
+    translation_threshold_m: float = 0.05,
+    rotation_threshold_rad: float = 0.25,
 ) -> dict[str, float]:
+    if min(translation_threshold_m, rotation_threshold_rad) <= 0:
+        raise ValueError("action threshold 必须为正")
     normalized_error = (prediction - target).abs().mean(dim=-1)
-    prediction_physical = _denormalize_actions(prediction)
-    target_physical = _denormalize_actions(target)
+    prediction_physical = _denormalize_actions(prediction, pose_scales)
+    target_physical = _denormalize_actions(target, pose_scales)
     translation = torch.linalg.vector_norm(
         prediction_physical[..., :3] - target_physical[..., :3], dim=-1
     )
@@ -441,7 +455,9 @@ def _physical_metrics(
         return float((values * weights).sum() / weights.sum().clamp_min(1.0))
 
     step_success = (
-        (translation < 0.05) & (rotation < 0.25) & gripper_correct
+        (translation < translation_threshold_m)
+        & (rotation < rotation_threshold_rad)
+        & gripper_correct
     )
     chunk_success = (step_success | ~target_mask).all(dim=1).float().mean()
     return {

@@ -26,7 +26,10 @@ from dev.predictor.jacobian_transport_model import (
     LocalJacobianActionTransport,
 )
 from dev.predictor.train_action_chunks import _denormalize_actions
-from dev.simulator.evaluate_maniskill_demo_prior import _load_split
+from dev.simulator.evaluate_maniskill_demo_prior import (
+    _action_protocol,
+    _load_split,
+)
 from dev.simulator.maniskill_action_bridge import (
     audit_round_trip,
     canonical_to_controller,
@@ -58,6 +61,7 @@ class ClosedLoopConfig:
     position_limit_m: float
     rotation_scale_rad: float
     bootstrap_resamples: int
+    stop_on_truncation: bool = True
 
     @classmethod
     def from_json(cls, path: Path) -> "ClosedLoopConfig":
@@ -237,6 +241,7 @@ def _policy_action(
     train_actions: torch.Tensor,
     geometry_std: torch.Tensor,
     model: LocalJacobianActionTransport,
+    pose_scales: torch.Tensor,
     config: ClosedLoopConfig,
     device: torch.device,
 ) -> tuple[np.ndarray, dict[str, Any]]:
@@ -277,7 +282,9 @@ def _policy_action(
                 normalized[..., 3:6] = demo_actions[..., 3:6]
             else:
                 raise ValueError(f"未知 policy：{policy}")
-        canonical = _denormalize_actions(normalized)[0, 0].cpu().numpy()
+        canonical = _denormalize_actions(
+            normalized, pose_scales
+        )[0, 0].cpu().numpy()
     converted = canonical_to_controller(
         canonical,
         context.tcp_pose,
@@ -428,8 +435,14 @@ def run(
     if overlap:
         raise ValueError(f"closed-loop seeds 与 replay 重叠：{sorted(overlap)}")
     data_hash = _sha256(data_root / "summary.json")
+    (
+        pose_scales,
+        _,
+        _,
+        action_representation,
+    ) = _action_protocol(data_root)
     train_records, train_geometry_cpu, train_actions_cpu = _load_split(
-        data_root, "train"
+        data_root, "train", pose_scales
     )
     active_label = _active_label(train_records)
     model, checkpoint = _load_model(
@@ -437,6 +450,17 @@ def run(
         data_summary_sha256=data_hash,
         device=device,
     )
+    checkpoint_scales = checkpoint.get("action_pose_scales")
+    if checkpoint_scales is not None and not torch.allclose(
+        torch.as_tensor(checkpoint_scales).float(), pose_scales.float()
+    ):
+        raise ValueError("checkpoint action pose scales 与数据表示不一致")
+    checkpoint_representation = checkpoint.get("action_representation")
+    if (
+        checkpoint_representation is not None
+        and checkpoint_representation != action_representation
+    ):
+        raise ValueError("checkpoint action representation 与数据不一致")
     geometry_mean = checkpoint["geometry_mean"].float()
     geometry_std = checkpoint["geometry_std"].float().clamp_min(1e-4)
     computed_mean = train_geometry_cpu.mean(dim=0)
@@ -512,6 +536,7 @@ def run(
                         train_actions=train_actions,
                         geometry_std=geometry_std,
                         model=model,
+                        pose_scales=pose_scales,
                         config=config,
                         device=device,
                     )
@@ -548,7 +573,9 @@ def run(
                         success = True
                         success_step = step + 1
                         break
-                    if _scalar_bool(terminated) or _scalar_bool(truncated):
+                    if _scalar_bool(terminated) or (
+                        config.stop_on_truncation and _scalar_bool(truncated)
+                    ):
                         break
                 rollouts[policy].append(
                     {
@@ -605,11 +632,21 @@ def run(
             "retrieval": "standardized 17D geometry top-1 over train chunks",
             "execution": "receding horizon; execute first token from H=6",
             "text_stage": "not applicable in fixed single-task closed-loop pilot",
-            "success": "first environment info.success within 50 steps",
+            "success": (
+                "first environment info.success within "
+                f"{config.max_episode_steps} steps"
+            ),
+            "truncation": (
+                "stop" if config.stop_on_truncation else "record but continue"
+            ),
             "refusal": "visible active points < threshold; zero/hold action",
             "seed_split": "all rollout seeds disjoint from 32 replay episodes",
         },
         "config": asdict(config),
+        "action_protocol": {
+            "representation": action_representation,
+            "pose_scales": pose_scales.tolist(),
+        },
         "device": str(device),
         "cuda_name": (
             torch.cuda.get_device_name(device) if device.type == "cuda" else None

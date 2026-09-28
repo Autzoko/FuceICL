@@ -30,6 +30,7 @@ from dev.predictor.train_action_chunks import (
     _physical_metrics,
 )
 from dev.simulator.evaluate_maniskill_demo_prior import (
+    _action_protocol,
     _diverse_top_k,
     _load_split,
 )
@@ -267,11 +268,15 @@ def _predict(
 def _per_query_metrics(
     prediction: torch.Tensor,
     target: torch.Tensor,
+    *,
+    pose_scales: torch.Tensor,
+    translation_threshold_m: float,
+    rotation_threshold_rad: float,
 ) -> dict[str, np.ndarray]:
     """返回 episode bootstrap 所需的 query 级完整指标。"""
     normalized_error = (prediction - target).abs().mean(dim=(1, 2))
-    prediction_physical = _denormalize_actions(prediction)
-    target_physical = _denormalize_actions(target)
+    prediction_physical = _denormalize_actions(prediction, pose_scales)
+    target_physical = _denormalize_actions(target, pose_scales)
     translation = torch.linalg.vector_norm(
         prediction_physical[..., :3] - target_physical[..., :3], dim=-1
     )
@@ -282,7 +287,11 @@ def _per_query_metrics(
         (prediction_physical[..., 6] >= 0.5)
         == (target_physical[..., 6] >= 0.5)
     )
-    step = (translation < 0.05) & (rotation < 0.25) & gripper
+    step = (
+        (translation < translation_threshold_m)
+        & (rotation < rotation_threshold_rad)
+        & gripper
+    )
     return {
         "normalized_mae": normalized_error.numpy(),
         "translation_l2_m": translation.mean(dim=1).numpy(),
@@ -329,11 +338,19 @@ def _bootstrap_comparison(
     target: torch.Tensor,
     group_ids: Sequence[str],
     config: TrainConfig,
+    pose_scales: torch.Tensor,
+    translation_threshold_m: float,
+    rotation_threshold_rad: float,
     *,
     seed_offset: int,
 ) -> dict[str, dict[str, float | int]]:
-    reference_metrics = _per_query_metrics(reference, target)
-    candidate_metrics = _per_query_metrics(candidate, target)
+    metric_options = {
+        "pose_scales": pose_scales,
+        "translation_threshold_m": translation_threshold_m,
+        "rotation_threshold_rad": rotation_threshold_rad,
+    }
+    reference_metrics = _per_query_metrics(reference, target, **metric_options)
+    candidate_metrics = _per_query_metrics(candidate, target, **metric_options)
     return {
         name: _episode_bootstrap(
             reference=reference_metrics[name],
@@ -349,10 +366,11 @@ def _bootstrap_comparison(
 def _held_gripper_zero(
     geometry: torch.Tensor,
     target_actions: torch.Tensor,
+    pose_scales: torch.Tensor,
 ) -> torch.Tensor:
     physical = torch.zeros_like(target_actions)
     physical[..., 6] = geometry[:, 15, None].clamp(0.0, 1.0)
-    return _normalize_actions(physical)
+    return _normalize_actions(physical, pose_scales)
 
 
 def _decision(
@@ -413,8 +431,18 @@ def run(
     temporary.mkdir(parents=True)
     _seed_everything(config.seed)
 
-    train_records, train_geometry, train_actions = _load_split(data_root, "train")
-    val_records, val_geometry, val_actions = _load_split(data_root, "val")
+    (
+        pose_scales,
+        translation_threshold_m,
+        rotation_threshold_rad,
+        action_representation,
+    ) = _action_protocol(data_root)
+    train_records, train_geometry, train_actions = _load_split(
+        data_root, "train", pose_scales
+    )
+    val_records, val_geometry, val_actions = _load_split(
+        data_root, "val", pose_scales
+    )
     if train_actions.shape[1:] != val_actions.shape[1:]:
         raise ValueError("train/validation action shape 不一致")
     geometry_mean = train_geometry.mean(dim=0)
@@ -496,14 +524,20 @@ def run(
     oracle_errors = (hypotheses - val_actions[:, None]).abs().mean(dim=(2, 3))
     oracle_indices = oracle_errors.argmin(dim=1)
     oracle = hypotheses[torch.arange(len(val_actions)), oracle_indices]
-    zero = _held_gripper_zero(val_geometry, val_actions)
+    zero = _held_gripper_zero(val_geometry, val_actions, pose_scales)
+
+    metric_options = {
+        "pose_scales": pose_scales,
+        "translation_threshold_m": translation_threshold_m,
+        "rotation_threshold_rad": rotation_threshold_rad,
+    }
 
     train_metrics = {
         "geometry_rank1_copy": _physical_metrics(
-            train_copy, train_actions, ones_train
+            train_copy, train_actions, ones_train, **metric_options
         ),
         "local_jacobian_transport": _physical_metrics(
-            train_transport, train_actions, ones_train
+            train_transport, train_actions, ones_train, **metric_options
         ),
     }
     predictions = {
@@ -514,7 +548,9 @@ def run(
         f"oracle_best_in_{config.retrieval_k}": oracle,
     }
     metrics = {
-        name: _physical_metrics(prediction, val_actions, ones_val)
+        name: _physical_metrics(
+            prediction, val_actions, ones_val, **metric_options
+        )
         for name, prediction in predictions.items()
     }
     group_ids = [f"PickCube-v1:{record['episode']}" for record in val_records]
@@ -525,6 +561,9 @@ def run(
             val_actions,
             group_ids,
             config,
+            pose_scales,
+            translation_threshold_m,
+            rotation_threshold_rad,
             seed_offset=0,
         ),
         "transport_minus_zero": _bootstrap_comparison(
@@ -533,6 +572,9 @@ def run(
             val_actions,
             group_ids,
             config,
+            pose_scales,
+            translation_threshold_m,
+            rotation_threshold_rad,
             seed_offset=100,
         ),
     }
@@ -549,6 +591,8 @@ def run(
         "data_summary_sha256": _sha256(data_root / "summary.json"),
         "train_manifest_sha256": _sha256(data_root / "manifest-train.jsonl"),
         "train_demo_selection_sha256": _selection_hash(train_demo_indices),
+        "action_pose_scales": pose_scales,
+        "action_representation": action_representation,
         "git_commit": _git_commit(project_root),
     }
     checkpoint_path = temporary / "local_jacobian_transport.pt"
@@ -579,6 +623,12 @@ def run(
             torch.cuda.get_device_name(device) if device.type == "cuda" else None
         ),
         "config": asdict(config),
+        "action_protocol": {
+            "representation": action_representation,
+            "pose_scales": pose_scales.tolist(),
+            "translation_threshold_m": translation_threshold_m,
+            "rotation_threshold_rad": rotation_threshold_rad,
+        },
         "git_commit": _git_commit(project_root),
         "data_summary_sha256": _sha256(data_root / "summary.json"),
         "config_sha256": _sha256(config_path),

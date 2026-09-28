@@ -19,6 +19,7 @@ from dev.predictor.evaluate_jacobian_significance import (
     _per_query_metrics,
 )
 from dev.predictor.train_action_chunks import (
+    POSE_SCALES,
     _normalize_actions,
     _physical_metrics,
 )
@@ -43,8 +44,25 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     ]
 
 
+def _action_protocol(root: Path) -> tuple[torch.Tensor, float, float, str]:
+    """按数据表示固定归一化尺度和离线 command 准确阈值。"""
+    summary = json.loads((root / "summary.json").read_text(encoding="utf-8"))
+    config = summary.get("config", {})
+    representation = str(
+        config.get("action_representation", "cumulative_observation_delta")
+    )
+    if representation == "canonical_controller_command":
+        position = float(config["position_limit_m"])
+        rotation = abs(float(config["rotation_scale_rad"]))
+        scales = torch.tensor([position] * 3 + [rotation] * 3)
+        return scales, 0.1 * position, 0.1 * rotation, representation
+    return POSE_SCALES.clone(), 0.05, 0.25, representation
+
+
 def _load_split(
-    root: Path, split: str
+    root: Path,
+    split: str,
+    pose_scales: torch.Tensor | Sequence[float] | None = None,
 ) -> tuple[list[dict[str, Any]], torch.Tensor, torch.Tensor]:
     records = _read_jsonl(root / f"manifest-{split}.jsonl")
     cache: dict[str, Mapping[str, np.ndarray]] = {}
@@ -63,7 +81,9 @@ def _load_split(
     return (
         records,
         torch.from_numpy(np.stack(geometries)).float(),
-        _normalize_actions(torch.from_numpy(np.stack(actions)).float()),
+        _normalize_actions(
+            torch.from_numpy(np.stack(actions)).float(), pose_scales
+        ),
     )
 
 
@@ -105,9 +125,21 @@ def _bootstrap_comparison(
     group_ids: Sequence[str],
     seed: int,
     resamples: int,
+    pose_scales: torch.Tensor,
+    translation_threshold_m: float,
+    rotation_threshold_rad: float,
 ) -> dict[str, Any]:
-    reference_metrics = _per_query_metrics(reference, target, mask)
-    candidate_metrics = _per_query_metrics(candidate, target, mask)
+    metric_options = {
+        "pose_scales": pose_scales,
+        "translation_threshold_m": translation_threshold_m,
+        "rotation_threshold_rad": rotation_threshold_rad,
+    }
+    reference_metrics = _per_query_metrics(
+        reference, target, mask, **metric_options
+    )
+    candidate_metrics = _per_query_metrics(
+        candidate, target, mask, **metric_options
+    )
     return {
         metric: _episode_bootstrap(
             reference=reference_metrics[metric],
@@ -132,8 +164,18 @@ def run(
 ) -> None:
     if output_path.exists():
         raise FileExistsError(f"输出已存在，拒绝覆盖：{output_path}")
-    train_records, train_geometry, train_actions = _load_split(data_root, "train")
-    val_records, val_geometry, val_actions = _load_split(data_root, "val")
+    (
+        pose_scales,
+        translation_threshold_m,
+        rotation_threshold_rad,
+        action_representation,
+    ) = _action_protocol(data_root)
+    train_records, train_geometry, train_actions = _load_split(
+        data_root, "train", pose_scales
+    )
+    val_records, val_geometry, val_actions = _load_split(
+        data_root, "val", pose_scales
+    )
     mean = train_geometry.mean(dim=0)
     std = train_geometry.std(dim=0, unbiased=False).clamp_min(1e-4)
     distances = torch.cdist(
@@ -148,7 +190,7 @@ def run(
     current_gripper = val_geometry[:, 15].clamp(0.0, 1.0)
     zero_physical = torch.zeros_like(val_actions)
     zero_physical[..., 6] = current_gripper[:, None]
-    zero_action = _normalize_actions(zero_physical)
+    zero_action = _normalize_actions(zero_physical, pose_scales)
     rank1 = hypotheses[:, 0]
     errors = (hypotheses - val_actions[:, None]).abs().mean(dim=(2, 3))
     oracle2_index = errors[:, :2].argmin(dim=1)
@@ -160,7 +202,14 @@ def run(
         f"oracle_best_in_{k}": hypotheses[batch, oracle4_index],
     }
     metrics = {
-        name: _physical_metrics(prediction, val_actions, target_mask)
+        name: _physical_metrics(
+            prediction,
+            val_actions,
+            target_mask,
+            pose_scales=pose_scales,
+            translation_threshold_m=translation_threshold_m,
+            rotation_threshold_rad=rotation_threshold_rad,
+        )
         for name, prediction in predictions.items()
     }
     group_ids = [f"PickCube-v1:{record['episode']}" for record in val_records]
@@ -185,6 +234,12 @@ def run(
             "seed": seed,
             "bootstrap_resamples": bootstrap_resamples,
         },
+        "action_protocol": {
+            "representation": action_representation,
+            "pose_scales": pose_scales.tolist(),
+            "translation_threshold_m": translation_threshold_m,
+            "rotation_threshold_rad": rotation_threshold_rad,
+        },
         "git_commit": _git_commit(project_root),
         "data_summary_sha256": _sha256(data_root / "summary.json"),
         "train_queries": len(train_records),
@@ -200,6 +255,9 @@ def run(
                 group_ids=group_ids,
                 seed=seed,
                 resamples=bootstrap_resamples,
+                pose_scales=pose_scales,
+                translation_threshold_m=translation_threshold_m,
+                rotation_threshold_rad=rotation_threshold_rad,
             ),
             f"oracle_best_in_{k}_minus_rank1_copy": _bootstrap_comparison(
                 reference=rank1,
@@ -209,6 +267,9 @@ def run(
                 group_ids=group_ids,
                 seed=seed + 100,
                 resamples=bootstrap_resamples,
+                pose_scales=pose_scales,
+                translation_threshold_m=translation_threshold_m,
+                rotation_threshold_rad=rotation_threshold_rad,
             ),
         },
         "geometry_distance": {
