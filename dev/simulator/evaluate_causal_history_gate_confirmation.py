@@ -59,13 +59,18 @@ class ConfirmationConfig:
     source_checkpoint_sha256: str
     history_checkpoint_sha256: str
     bootstrap_resamples: int
+    primary_variant: str = "two_lag"
+    zero_history_control: bool = False
 
     @classmethod
     def from_json(cls, path: Path) -> "ConfirmationConfig":
         return cls(**json.loads(path.read_text(encoding="utf-8")))
 
     def __post_init__(self) -> None:
-        if self.schema_version != "maniskill-causal-history-gate-confirm-v1":
+        if self.schema_version not in {
+            "maniskill-causal-history-gate-confirm-v1",
+            "maniskill-minimal-history-gate-confirm-v1",
+        }:
             raise ValueError("未知 CHBG confirmation schema")
         if min(self.expected_episodes_per_task, self.bootstrap_resamples) <= 0:
             raise ValueError("CHBG confirmation 正数配置非法")
@@ -79,6 +84,15 @@ class ConfirmationConfig:
             )
         ):
             raise ValueError("冻结 checkpoint SHA256 非法")
+        expected = {
+            "maniskill-causal-history-gate-confirm-v1": ("two_lag", False),
+            "maniskill-minimal-history-gate-confirm-v1": (
+                "first_order",
+                True,
+            ),
+        }[self.schema_version]
+        if (self.primary_variant, self.zero_history_control) != expected:
+            raise ValueError("confirmation primary/control 与 schema 不匹配")
 
 
 def _git_commit(root: Path) -> str:
@@ -201,14 +215,20 @@ def run(
     if set(banks) != EXPECTED_TASKS or set(queries) != EXPECTED_TASKS:
         raise ValueError("bank/query roots 未覆盖冻结三任务")
 
+    zero_name = f"{config.primary_variant}_zero_history"
+    prediction_names = ["copy", "bcsg", *VARIANTS]
+    gate_names = ["bcsg", *VARIANTS]
+    if config.zero_history_control:
+        prediction_names.append(zero_name)
+        gate_names.append(zero_name)
     per_task: dict[str, Any] = {}
     aggregate_target = []
     aggregate_predictions: dict[str, list[torch.Tensor]] = {
-        name: [] for name in ("copy", "bcsg", *VARIANTS)
+        name: [] for name in prediction_names
     }
     aggregate_groups: list[str] = []
     aggregate_gate_values: dict[str, list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]] = {
-        name: [] for name in ("bcsg", *VARIANTS)
+        name: [] for name in gate_names
     }
     artifact: dict[str, list[np.ndarray]] = {}
     source_seed_sets: dict[str, set[int]] = {}
@@ -292,6 +312,22 @@ def run(
                 gate_values,
                 mask,
             )
+        if config.zero_history_control:
+            primary_gate = gates[config.primary_variant]
+            history_dim = primary_gate.config.input_dim - base.shape[1]
+            zero_features = torch.cat(
+                (base, torch.zeros((len(base), history_dim))),
+                dim=1,
+            )
+            with torch.inference_mode():
+                zero_values = primary_gate(zero_features.to(device)).cpu()
+            values[zero_name] = zero_values
+            predictions[zero_name] = apply_shrinkage(
+                demo_actions,
+                transported,
+                zero_values,
+                mask,
+            )
         options = {
             "pose_scales": query.pose_scales,
             "translation_threshold_m": query.translation_threshold_m,
@@ -325,6 +361,19 @@ def run(
             resamples=config.bootstrap_resamples,
             **options,
         )
+        if config.zero_history_control:
+            comparisons[f"{config.primary_variant}_minus_zero_history"] = (
+                _bootstrap_comparison(
+                    reference=predictions[zero_name],
+                    candidate=predictions[config.primary_variant],
+                    target=target,
+                    mask=mask,
+                    group_ids=groups,
+                    seed=config.seed + offset * 100 + 20,
+                    resamples=config.bootstrap_resamples,
+                    **options,
+                )
+            )
         gate_mse = {
             "bcsg": _weighted_mse(baseline_values, optimal, energy),
             **{
@@ -401,6 +450,19 @@ def run(
         resamples=config.bootstrap_resamples,
         **options,
     )
+    if config.zero_history_control:
+        comparisons[f"{config.primary_variant}_minus_zero_history"] = (
+            _bootstrap_comparison(
+                reference=predictions[zero_name],
+                candidate=predictions[config.primary_variant],
+                target=target,
+                mask=mask,
+                group_ids=aggregate_groups,
+                seed=config.seed + 3000,
+                resamples=config.bootstrap_resamples,
+                **options,
+            )
+        )
     gate_mse = {}
     for name, rows in aggregate_gate_values.items():
         gate_mse[name] = _weighted_mse(
@@ -408,11 +470,17 @@ def run(
             torch.cat([row[1] for row in rows]),
             torch.cat([row[2] for row in rows]),
         )
-    two_lag_bcsg = comparisons["two_lag_minus_bcsg"]["translation_l2_m"]
-    two_lag_shuffled = comparisons["two_lag_minus_shuffled"]["translation_l2_m"]
+    primary = config.primary_variant
+    primary_bcsg = comparisons[f"{primary}_minus_bcsg"]["translation_l2_m"]
+    primary_shuffled = comparisons["two_lag_minus_shuffled"]["translation_l2_m"]
     improved_tasks = sum(
-        values["metrics"]["two_lag"]["translation_l2_m"]
+        values["metrics"][primary]["translation_l2_m"]
         <= values["metrics"]["bcsg"]["translation_l2_m"]
+        and (
+            not config.zero_history_control
+            or values["metrics"][primary]["translation_l2_m"]
+            <= values["metrics"][zero_name]["translation_l2_m"]
+        )
         for values in per_task.values()
     )
     no_demo_actions = torch.zeros((1, target.shape[1], target.shape[2]), device=device)
@@ -426,8 +494,8 @@ def run(
             no_demo_actions,
             no_demo_mask,
         )
-        history_dim = gates["two_lag"].config.input_dim - no_demo_base.shape[1]
-        no_demo_gate = gates["two_lag"](
+        history_dim = gates[primary].config.input_dim - no_demo_base.shape[1]
+        no_demo_gate = gates[primary](
             torch.cat(
                 (no_demo_base, torch.zeros((1, history_dim), device=device)),
                 dim=1,
@@ -441,7 +509,7 @@ def run(
         )
         gate_zero_output = apply_shrinkage(
             predictions["copy"][:1].to(device),
-            predictions["two_lag"][:1].to(device),
+            predictions[primary][:1].to(device),
             torch.zeros(1, device=device),
             torch.ones_like(no_demo_mask),
         )
@@ -458,31 +526,59 @@ def run(
             for name, gate in gates.items()
         },
     }
-    criteria = {
-        "f1_gate_mse_improves_at_least_10_percent": (
-            gate_mse["two_lag"] <= 0.9 * gate_mse["bcsg"]
-        ),
-        "f2_translation_ci_better_than_bcsg": two_lag_bcsg["ci95_high"] < 0.0,
-        "f3_translation_ci_better_than_shuffled": (
-            two_lag_shuffled["ci95_high"] < 0.0
-        ),
-        "f3_gate_mse_better_than_shuffled": (
-            gate_mse["two_lag"] < gate_mse["shuffled_two_lag"]
-        ),
-        "f4_at_least_two_tasks_not_worse_than_bcsg": improved_tasks >= 2,
-        "f5_source_seeds_unique": len(all_source_seeds) == len(set(all_source_seeds)),
-        "f5_history_checkpoint_frozen": (
+    shared_criteria = {
+        "source_seeds_unique": len(all_source_seeds) == len(set(all_source_seeds)),
+        "history_checkpoint_frozen": (
             _sha256(history_checkpoint_path) == config.history_checkpoint_sha256
         ),
-        "f5_source_checkpoint_frozen": (
+        "source_checkpoint_frozen": (
             source_sha256 == config.source_checkpoint_sha256
         ),
-        "f5_parameter_budget": (
-            parameter_counts["qa_lrdat"] + parameter_counts["two_lag"] < 250_000
+        "parameter_budget": (
+            parameter_counts["qa_lrdat"] + parameter_counts[primary] < 250_000
         ),
-        "f5_no_demo_exact": float(no_demo_output.abs().max()) == 0.0,
-        "f5_gate_zero_exact_copy": gate_zero_error == 0.0,
+        "no_demo_exact": float(no_demo_output.abs().max()) == 0.0,
+        "gate_zero_exact_copy": gate_zero_error == 0.0,
     }
+    if config.schema_version == "maniskill-causal-history-gate-confirm-v1":
+        criteria = {
+            "f1_gate_mse_improves_at_least_10_percent": (
+                gate_mse[primary] <= 0.9 * gate_mse["bcsg"]
+            ),
+            "f2_translation_ci_better_than_bcsg": (
+                primary_bcsg["ci95_high"] < 0.0
+            ),
+            "f3_translation_ci_better_than_shuffled": (
+                primary_shuffled["ci95_high"] < 0.0
+            ),
+            "f3_gate_mse_better_than_shuffled": (
+                gate_mse[primary] < gate_mse["shuffled_two_lag"]
+            ),
+            "f4_at_least_two_tasks_not_worse_than_bcsg": improved_tasks >= 2,
+            **{f"f5_{name}": value for name, value in shared_criteria.items()},
+        }
+    else:
+        primary_zero = comparisons[
+            f"{primary}_minus_zero_history"
+        ]["translation_l2_m"]
+        criteria = {
+            "m1_gate_mse_improves_at_least_10_percent": (
+                gate_mse[primary] <= 0.9 * gate_mse["bcsg"]
+            ),
+            "m2_translation_ci_better_than_bcsg": (
+                primary_bcsg["ci95_high"] < 0.0
+            ),
+            "m3_translation_ci_better_than_zero_history": (
+                primary_zero["ci95_high"] < 0.0
+            ),
+            "m3_gate_mse_better_than_zero_history": (
+                gate_mse[primary] < gate_mse[zero_name]
+            ),
+            "m4_at_least_two_tasks_not_worse_than_controls": (
+                improved_tasks >= 2
+            ),
+            **{f"m5_{name}": value for name, value in shared_criteria.items()},
+        }
     artifact_path = temporary / "predictions.npz"
     with artifact_path.open("wb") as stream:
         np.savez_compressed(
@@ -493,7 +589,10 @@ def run(
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "git_commit": _git_commit(project_root),
-        "protocol": "frozen CHBG on 24 fresh expert episodes per task",
+        "protocol": (
+            f"frozen {primary} causal-history gate on "
+            f"{config.expected_episodes_per_task} fresh expert episodes per task"
+        ),
         "config": asdict(config),
         "config_sha256": _sha256(config_path),
         "source_checkpoint_sha256": source_sha256,
