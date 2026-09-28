@@ -1,0 +1,13 @@
+{
+  "schema_version": "maniskill-causal-history-gate-confirm-v1",
+  "seed": 20260930,
+  "expected_episodes_per_task": 24,
+  "source_start_seeds": {
+    "PickCube-v1": 4000000,
+    "PushCube-v1": 5000000,
+    "PullCube-v1": 6000000
+  },
+  "source_checkpoint_sha256": "015d57a36f57f65ae310376badd3781621efa402d90f9b378b1cd75375e2b143",
+  "history_checkpoint_sha256": "6dbb48e251eb5922c0f9e23603d8bf481b83f8539489b45015733345d2d0143b",
+  "bootstrap_resamples": 10000
+}
