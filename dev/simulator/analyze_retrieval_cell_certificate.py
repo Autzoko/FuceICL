@@ -89,6 +89,24 @@ def _task_analysis(
     retrieval_mean = bank_geometry.mean(dim=0)
     retrieval_std = bank_geometry.std(dim=0, unbiased=False).clamp_min(1e-4)
 
+    operator_demo_geometry = bank_geometry[protocol.train_demo_indices]
+    operator_demo_actions = bank_actions[protocol.train_demo_indices]
+    operator_transport, _ = _qa_diagnostics(
+        transport,
+        bank_geometry,
+        operator_demo_geometry,
+        operator_demo_actions,
+        device,
+    )
+    operator_mask = torch.ones(bank_actions.shape[:2], dtype=torch.bool)
+    operator_benefit, operator_energy = optimal_shrinkage_target(
+        operator_demo_actions,
+        operator_transport,
+        bank_actions,
+        operator_mask,
+    )
+    informative_operator = operator_energy > 1e-8
+
     calibration_query = task.train_geometry[protocol.calibration_indices]
     calibration_target = task.train_actions[protocol.calibration_indices]
     calibration_demo_geometry = bank_geometry[
@@ -112,25 +130,50 @@ def _task_analysis(
         calibration_target,
         calibration_mask,
     )
-    informative = calibration_energy > 1e-8
+    informative_calibration = calibration_energy > 1e-8
+    support_geometry = torch.cat(
+        (
+            bank_geometry[informative_operator],
+            calibration_query[informative_calibration],
+        )
+    )
+    support_benefit = torch.cat(
+        (
+            operator_benefit[informative_operator],
+            calibration_benefit[informative_calibration],
+        )
+    )
+    support_cell = torch.cat(
+        (
+            protocol.train_demo_indices[informative_operator],
+            protocol.calibration_demo_indices[informative_calibration],
+        )
+    )
     lipschitz_constant, slope_audit = empirical_cell_lipschitz_constant(
-        calibration_query[informative],
-        calibration_benefit[informative],
-        protocol.calibration_demo_indices[informative],
+        support_geometry,
+        support_benefit,
+        support_cell,
         geometry_mean=retrieval_mean,
         geometry_std=retrieval_std,
     )
     certificate = RetrievalCellCertificate(
-        support_geometry=calibration_query[informative],
-        support_benefit=calibration_benefit[informative],
-        support_cell=protocol.calibration_demo_indices[informative],
+        support_geometry=support_geometry,
+        support_benefit=support_benefit,
+        support_cell=support_cell,
         geometry_mean=retrieval_mean,
         geometry_std=retrieval_std,
         lipschitz_constant=lipschitz_constant,
     )
     interpolation, _, _ = certificate.lower_bound(
-        calibration_query[informative],
-        protocol.calibration_demo_indices[informative],
+        support_geometry,
+        support_cell,
+    )
+    interpolation_error = float(
+        (interpolation - support_benefit).abs().max()
+    )
+    empirically_certifiable = (
+        slope_audit["near_duplicate_conflicts"] == 0
+        and interpolation_error <= 1e-5
     )
 
     demo_geometry = bank_geometry[protocol.validation_demo_indices]
@@ -144,9 +187,14 @@ def _task_analysis(
     )
     with torch.inference_mode():
         base_gate = gate(validation_features.to(device)).cpu()
-    lower_bound, support_distance, has_support = certificate.lower_bound(
+    raw_lower_bound, support_distance, has_support = certificate.lower_bound(
         task.val_geometry,
         protocol.validation_demo_indices,
+    )
+    lower_bound = (
+        raw_lower_bound
+        if empirically_certifiable
+        else torch.zeros_like(raw_lower_bound)
     )
     certified_gate = support_certified_gate(base_gate, lower_bound)
     mask = torch.ones(task.val_actions.shape[:2], dtype=torch.bool)
@@ -187,22 +235,31 @@ def _task_analysis(
     rccs_loss_violation = rccs_loss > copy_loss + 1e-8
     bcsg_loss_violation = bcsg_loss > copy_loss + 1e-8
     report = {
-        "calibration": {
-            "queries": len(calibration_query),
-            "informative_queries": int(informative.sum()),
+        "support_fit": {
+            "operator_queries": len(bank_geometry),
+            "informative_operator_queries": int(informative_operator.sum()),
+            "calibration_queries": len(calibration_query),
+            "informative_calibration_queries": int(
+                informative_calibration.sum()
+            ),
+            "support_queries": len(support_geometry),
             "selected_cells": int(
-                torch.unique(protocol.calibration_demo_indices).numel()
+                torch.unique(support_cell).numel()
             ),
             "bank_cells": len(bank_geometry),
             "lipschitz_constant": lipschitz_constant,
             "slope_audit": slope_audit,
-            "optimal_benefit": _stats(calibration_benefit[informative]),
-            "base_gate": _stats(
+            "empirically_certifiable": empirically_certifiable,
+            "operator_optimal_benefit": _stats(
+                operator_benefit[informative_operator]
+            ),
+            "calibration_optimal_benefit": _stats(
+                calibration_benefit[informative_calibration]
+            ),
+            "calibration_base_gate": _stats(
                 gate(calibration_features.to(device)).detach().cpu()
             ),
-            "interpolation_max_abs_error": float(
-                (interpolation - calibration_benefit[informative]).abs().max()
-            ),
+            "interpolation_max_abs_error": interpolation_error,
         },
         "validation": {
             "queries": len(task.val_geometry),

@@ -74,3 +74,17 @@ def test_exact_support_interpolation_with_empirical_slope() -> None:
         certificate.support_cell,
     )
     assert torch.allclose(lower, certificate.support_benefit)
+
+
+def test_near_duplicate_aliasing_is_reported() -> None:
+    slope, audit = empirical_cell_lipschitz_constant(
+        torch.tensor([[0.0], [0.0]]),
+        torch.tensor([0.1, 0.9]),
+        torch.tensor([3, 3]),
+        geometry_mean=torch.zeros(1),
+        geometry_std=torch.ones(1),
+    )
+
+    assert slope == 0.0
+    assert audit["near_duplicate_conflicts"] == 1
+    assert abs(float(audit["near_duplicate_max_benefit_gap"]) - 0.8) < 1e-6

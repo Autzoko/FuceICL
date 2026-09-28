@@ -101,7 +101,7 @@ def empirical_cell_lipschitz_constant(
     geometry_std: torch.Tensor,
     minimum_distance: float = 1e-6,
 ) -> tuple[float, dict[str, int | float]]:
-    """计算同 retrieval cell 校准点对的最大经验斜率。"""
+    """计算同 cell 经验斜率，并显式报告不可分辨的近重复点。"""
     if geometry.ndim != 2 or len(geometry) == 0:
         raise ValueError("geometry 必须是非空二维张量")
     if benefit.shape != (len(geometry),) or cell.shape != (len(geometry),):
@@ -121,20 +121,29 @@ def empirical_cell_lipschitz_constant(
         device=geometry.device,
     )
     same_cell = cell[rows] == cell[columns]
-    valid = same_cell & (distances >= minimum_distance)
-    if not bool(valid.any()):
-        raise ValueError("没有可用于估计 Lipschitz 常数的同 cell 点对")
-    slopes = (benefit[rows] - benefit[columns]).abs() / distances.clamp_min(
-        minimum_distance
-    )
+    if not bool(same_cell.any()):
+        raise ValueError("没有可用于审计的同 cell 点对")
+    benefit_gap = (benefit[rows] - benefit[columns]).abs()
+    near_duplicate = same_cell & (distances < minimum_distance)
+    alias_conflict = near_duplicate & (benefit_gap > 1e-6)
+    valid = same_cell & ~near_duplicate
+    slopes = benefit_gap / distances.clamp_min(minimum_distance)
     selected = slopes[valid]
-    return float(selected.max()), {
+    maximum = 0.0 if len(selected) == 0 else float(selected.max())
+    median = 0.0 if len(selected) == 0 else float(selected.median())
+    alias_gap = benefit_gap[alias_conflict]
+    return maximum, {
         "total_pairs": int(len(distances)),
         "same_cell_pairs": int(same_cell.sum()),
         "valid_pairs": int(valid.sum()),
+        "near_duplicate_pairs": int(near_duplicate.sum()),
+        "near_duplicate_conflicts": int(alias_conflict.sum()),
+        "near_duplicate_max_benefit_gap": (
+            0.0 if len(alias_gap) == 0 else float(alias_gap.max())
+        ),
         "cells_with_support": int(torch.unique(cell).numel()),
-        "maximum_slope": float(selected.max()),
-        "median_slope": float(selected.median()),
+        "maximum_slope": maximum,
+        "median_slope": median,
     }
 
 
@@ -152,4 +161,3 @@ def support_certified_gate(
     ):
         raise ValueError("benefit_lower_bound 必须位于 [0,1]")
     return torch.minimum(base_gate, 2.0 * benefit_lower_bound).clamp(0.0, 1.0)
-
