@@ -151,7 +151,7 @@ def _transport(
     return prediction, {
         "translation_component_clip_rate": float(clipped.float().mean()),
         "chunks_with_translation_clip_rate": float(
-            clipped.any(dim=(1, 2)).float().mean()
+            clipped.flatten(start_dim=1).any(dim=1).float().mean()
         ),
         "normalized_residual_abs_mean": float(residual.abs().mean()),
         "normalized_residual_abs_max": float(residual.abs().max()),
