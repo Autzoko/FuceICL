@@ -5,7 +5,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
-#SBATCH --time=02:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
