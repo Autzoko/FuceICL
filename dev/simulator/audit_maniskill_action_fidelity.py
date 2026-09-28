@@ -353,6 +353,7 @@ def run(
                 raw_actions = np.asarray(group["actions"], dtype=np.float32)
                 logged_tcp = np.asarray(group["obs/extra/tcp_pose"], dtype=np.float64)
                 logged_qpos = np.asarray(group["obs/agent/qpos"], dtype=np.float64)
+                logged_qvel = np.asarray(group["obs/agent/qvel"], dtype=np.float64)
                 initial_env_state = trajectory_utils.index_dict(
                     group["env_states"], 0
                 )
@@ -360,13 +361,31 @@ def run(
                     raise ValueError(f"episode {episode_id} action shape 非法")
                 if not np.isfinite(raw_actions).all():
                     raise ValueError(f"episode {episode_id} controller action 非法")
-                if len(logged_tcp) != len(logged_qpos):
-                    raise ValueError(f"episode {episode_id} TCP/qpos 长度不一致")
+                if not (len(logged_tcp) == len(logged_qpos) == len(logged_qvel)):
+                    raise ValueError(f"episode {episode_id} TCP/qpos/qvel 长度不一致")
                 if len(raw_actions) not in (len(logged_tcp), len(logged_tcp) - 1):
                     raise ValueError(f"episode {episode_id} action/obs 长度不一致")
+                panda_state = np.asarray(
+                    initial_env_state["articulations"]["panda"],
+                    dtype=np.float64,
+                ).copy()
+                dof = logged_qpos.shape[1]
+                if panda_state.shape != (13 + 2 * dof,):
+                    raise ValueError(f"episode {episode_id} Panda state shape 非法")
+                state_observation_qpos_difference = float(
+                    np.max(np.abs(panda_state[13 : 13 + dof] - logged_qpos[0]))
+                )
+                # 控制模式转换后的 observation 与 source articulation state 不同；
+                # actor state 保持 source 值，Panda 使用同帧可观测 qpos/qvel。
+                panda_state[13 : 13 + dof] = logged_qpos[0]
+                panda_state[13 + dof : 13 + 2 * dof] = logged_qvel[0]
+                initial_env_state["articulations"]["panda"] = panda_state
                 offline_audits.append(
                     {
                         "episode_id": episode_id,
+                        "source_state_observation_qpos_max_abs_difference": (
+                            state_observation_qpos_difference
+                        ),
                         **_offline_command_audit(
                             raw_actions, logged_tcp, logged_qpos, config
                         ),
@@ -477,7 +496,10 @@ def run(
             "observed_delta": "execute adjacent logged TCP pose delta",
             "tracking": "track next logged TCP pose from current online pose",
             "selection": "first four successful source episodes; fixed before execution",
-            "initialization": "seed reset followed by exact HDF5 env_states[0]",
+            "initialization": (
+                "seed reset; HDF5 actor state plus same-frame observable Panda "
+                "qpos/qvel from the converted trajectory"
+            ),
         },
         "config": asdict(config),
         "git_commit": _git_commit(project_root),
