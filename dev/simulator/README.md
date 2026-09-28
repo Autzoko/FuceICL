@@ -36,3 +36,7 @@ sbatch src/scripts/hpc/replay_maniskill_pointcloud.slurm \
   /scratch/ll5582/data/ManiSkill3/processed/replay_pick_cube_v1/source/trajectory.h5 \
   32
 ```
+
+重放结束后必须运行 `audit_replayed_trajectory.py`，核对 7D action、episode 成功标签、
+observation/action 时间偏移、16k pointcloud、有限值和 segmentation labels；审计通过前不进入
+chunk 预处理。
