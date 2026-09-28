@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=maniskill-smoke
-#SBATCH --partition=compute
+#SBATCH --partition=nvidia
+#SBATCH --gres=gpu:v100:1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G
@@ -13,10 +14,10 @@ set -euo pipefail
 readonly PROJECT_ROOT="${1:?project root is required}"
 readonly OUTPUT_PATH="${2:?output report path is required}"
 readonly ENV_ID="${3:-PickCube-v1}"
-readonly OBS_MODE="${4:-state}"
+readonly OBS_MODE="${4:-pointcloud}"
 readonly CONTROL_MODE="${5:-pd_ee_delta_pose}"
 readonly SIM_BACKEND="${6:-physx_cpu}"
-readonly RENDER_BACKEND="${7:-none}"
+readonly RENDER_BACKEND="${7:-gpu}"
 readonly ENV_NAME="FuseICL-maniskill"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 

@@ -15,6 +15,8 @@ from typing import Any
 import gymnasium as gym
 import mani_skill  # noqa: F401  # 导入时注册 ManiSkill environments。
 import numpy as np
+import sapien
+import torch
 
 
 def _git_commit(project_root: Path) -> str:
@@ -94,6 +96,7 @@ def run(
     )
     try:
         observation, reset_info = environment.reset(seed=seed)
+        reset_info_summary = _scalar_summary(reset_info)
         initial_signature = _tree_signature(observation)
         action = np.zeros(environment.action_space.shape, dtype=np.float32)
         step_records: list[dict[str, Any]] = []
@@ -122,6 +125,14 @@ def run(
             "mani_skill": mani_skill.__version__,
             "gymnasium": gym.__version__,
             "numpy": np.__version__,
+            "sapien": sapien.__version__,
+            "torch": torch.__version__,
+        },
+        "runtime": {
+            "cuda_available": torch.cuda.is_available(),
+            "cuda_device": (
+                torch.cuda.get_device_name(0) if torch.cuda.is_available() else None
+            ),
         },
         "environment": {
             "env_id": env_id,
@@ -134,7 +145,7 @@ def run(
             "action_space": str(environment.action_space),
             "observation_space": str(environment.observation_space),
         },
-        "reset_info": _scalar_summary(reset_info),
+        "reset_info": reset_info_summary,
         "initial_observation": initial_signature,
         "final_observation": final_signature,
         "steps": step_records,
