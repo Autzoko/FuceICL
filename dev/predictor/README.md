@@ -46,6 +46,7 @@ sbatch src/scripts/hpc/train_action_chunk_predictor.slurm \
   /scratch/ll5582/data/RLBench/processed/pointnet_pilot_v4 \
   /scratch/ll5582/data/RLBench/processed/action_chunk_pilot_v1 \
   /scratch/ll5582/data/RLBench/training/tiny_pointnetpp_pilot_v1/best.pt \
+  /scratch/ll5582/data/RLBench/evaluation/text_scores_train_v1.npz \
   /scratch/ll5582/data/RLBench/evaluation/text_scores_v1.npz \
   /scratch/ll5582/data/RLBench/training/action_chunk_predictor_pilot_v1
 ```

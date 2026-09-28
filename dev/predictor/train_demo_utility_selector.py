@@ -187,10 +187,9 @@ def _prepare_split(
     text_scores, chunk_groups, metadata = _load_text_scores(
         text_scores_path, store.records
     )
-    if split == "val" and metadata.get("manifest_sha256") != _sha256(
-        context_root / "manifest-val.jsonl"
-    ):
-        raise ValueError("文本分数与 val manifest 不匹配")
+    expected_manifest_hash = _sha256(context_root / f"manifest-{split}.jsonl")
+    if metadata.get("manifest_sha256") != expected_manifest_hash:
+        raise ValueError(f"文本分数与 {split} manifest 不匹配")
     text_mask = _text_candidate_masks(
         text_scores,
         chunk_groups,
@@ -374,7 +373,8 @@ def run(
     context_root: Path,
     action_root: Path,
     retriever_checkpoint: Path,
-    text_scores_path: Path,
+    train_text_scores_path: Path,
+    val_text_scores_path: Path,
     transport_checkpoint: Path,
     output_root: Path,
     train_config: TrainConfig,
@@ -401,7 +401,9 @@ def run(
             split=split,
             context_root=context_root,
             action_root=action_root,
-            text_scores_path=text_scores_path,
+            text_scores_path=(
+                train_text_scores_path if split == "train" else val_text_scores_path
+            ),
             retriever=retriever,
             transport=transport,
             train_config=train_config,
@@ -434,7 +436,8 @@ def run(
         "context_summary_sha256": context_hash,
         "action_summary_sha256": action_hash,
         "retriever_checkpoint_sha256": _sha256(retriever_checkpoint),
-        "text_scores_sha256": _sha256(text_scores_path),
+        "train_text_scores_sha256": _sha256(train_text_scores_path),
+        "val_text_scores_sha256": _sha256(val_text_scores_path),
         "transport_checkpoint_sha256": _sha256(transport_checkpoint),
         "git_commit": _git_commit(project_root),
     }
@@ -465,7 +468,8 @@ def run(
         "context_summary_sha256": context_hash,
         "action_summary_sha256": action_hash,
         "retriever_checkpoint_sha256": _sha256(retriever_checkpoint),
-        "text_scores_sha256": _sha256(text_scores_path),
+        "train_text_scores_sha256": _sha256(train_text_scores_path),
+        "val_text_scores_sha256": _sha256(val_text_scores_path),
         "transport_checkpoint_sha256": _sha256(transport_checkpoint),
         "split_summary": {
             split: {
@@ -493,7 +497,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-root", type=Path, required=True)
     parser.add_argument("--action-root", type=Path, required=True)
     parser.add_argument("--retriever-checkpoint", type=Path, required=True)
-    parser.add_argument("--text-scores", type=Path, required=True)
+    parser.add_argument("--train-text-scores", type=Path, required=True)
+    parser.add_argument("--val-text-scores", type=Path, required=True)
     parser.add_argument("--transport-checkpoint", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
@@ -511,7 +516,8 @@ def main() -> None:
         context_root=arguments.context_root.resolve(),
         action_root=arguments.action_root.resolve(),
         retriever_checkpoint=arguments.retriever_checkpoint.resolve(),
-        text_scores_path=arguments.text_scores.resolve(),
+        train_text_scores_path=arguments.train_text_scores.resolve(),
+        val_text_scores_path=arguments.val_text_scores.resolve(),
         transport_checkpoint=arguments.transport_checkpoint.resolve(),
         output_root=arguments.output_root.resolve(),
         train_config=TrainConfig.from_json(arguments.config.resolve()),
