@@ -1,0 +1,12 @@
+{
+  "schema_version": "rotated-layout-slide-demo-policy-confirmation-v1",
+  "seed": 20261005,
+  "bootstrap_resamples": 10000,
+  "minimum_relative_mse_improvement": 0.05,
+  "minimum_direction_accuracy": 0.95,
+  "maximum_wrong_operation_direction_accuracy": 0.1,
+  "maximum_parameters": 15000,
+  "latency_warmup": 200,
+  "latency_iterations": 2000,
+  "maximum_latency_p95_ms": 1.0
+}
