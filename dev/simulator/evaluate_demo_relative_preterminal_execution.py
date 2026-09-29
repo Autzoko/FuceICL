@@ -82,6 +82,8 @@ class PreterminalExecutionConfig:
     minimum_belief_risk_coverage: float = 1.0
     minimum_belief_risk_progress_coverage: float = 1.0
     minimum_belief_risk_pair_coverage: float = 1.0
+    minimum_missing_belief_queries: int = 0
+    minimum_belief_risk_rejected_queries: int = 0
 
     @classmethod
     def from_json(cls, path: Path) -> "PreterminalExecutionConfig":
@@ -108,6 +110,12 @@ class PreterminalExecutionConfig:
         )
         if min(integers) <= 0 or self.seed < 0 or self.action_horizon != 6:
             raise ValueError("execution integer 配置非法")
+        optional_counts = (
+            self.minimum_missing_belief_queries,
+            self.minimum_belief_risk_rejected_queries,
+        )
+        if min(optional_counts) < 0:
+            raise ValueError("belief risk 最少样本数不得为负")
         positive = (
             self.position_limit_m,
             abs(self.rotation_scale_rad),
@@ -267,6 +275,36 @@ def run(
         risk_accepted = np.ones(len(query_data["pair_id"]), dtype=bool)
     if set(query_data["seed"].tolist()) & set(bank_data["seed"].tolist()):
         raise ValueError("fresh query seed 与 Demo bank 重叠")
+    risk_audits = [
+        {
+            "valid": bool(risk_accepted[index]),
+            "pair_id": int(query_data["pair_id"][index]),
+            "progress_index": int(query_data["progress_index"][index]),
+        }
+        for index in range(len(risk_accepted))
+    ]
+    risk_coverage = _coverage(
+        risk_audits,
+        expected_progress_samples=config.expected_progress_samples,
+    )
+    missing_belief_queries = int(
+        query_report.get("belief", {}).get("propagated_rows", 0)
+    )
+    rejected_belief_queries = int(risk_report.get("rejected_rows", 0))
+    risk_support_passed = bool(
+        risk_coverage["fraction"] >= config.minimum_belief_risk_coverage
+        and risk_coverage["minimum_progress_fraction"]
+        >= config.minimum_belief_risk_progress_coverage
+        and risk_coverage["minimum_pair_fraction"]
+        >= config.minimum_belief_risk_pair_coverage
+        and missing_belief_queries >= config.minimum_missing_belief_queries
+        and rejected_belief_queries
+        >= config.minimum_belief_risk_rejected_queries
+    )
+    if not risk_support_passed:
+        raise RuntimeError(
+            "belief risk support 未通过，拒绝运行 learned policies"
+        )
 
     state_std = model.state_std.detach().cpu().numpy()
     bank_indices = np.where(bank_data["split_id"] == SPLITS["train"])[0]
@@ -287,18 +325,6 @@ def run(
     query_audits: list[dict[str, Any]] = []
     latencies = []
     no_demo_action_maximum = 0.0
-    risk_audits = [
-        {
-            "valid": bool(risk_accepted[index]),
-            "pair_id": int(query_data["pair_id"][index]),
-            "progress_index": int(query_data["progress_index"][index]),
-        }
-        for index in range(len(risk_accepted))
-    ]
-    risk_coverage = _coverage(
-        risk_audits,
-        expected_progress_samples=config.expected_progress_samples,
-    )
     try:
         for query_index in range(len(query_data["pair_id"])):
             if not risk_accepted[query_index]:
@@ -491,6 +517,10 @@ def run(
             >= config.minimum_belief_risk_progress_coverage
             and risk_coverage["minimum_pair_fraction"]
             >= config.minimum_belief_risk_pair_coverage
+            and missing_belief_queries
+            >= config.minimum_missing_belief_queries
+            and rejected_belief_queries
+            >= config.minimum_belief_risk_rejected_queries
             and coverage["fraction"] >= config.minimum_valid_query_fraction
             and coverage["minimum_progress_fraction"]
             >= config.minimum_progress_valid_fraction
@@ -562,6 +592,8 @@ def run(
         "two_forward_latency_ms": latency,
         "no_demo_action_maximum_absolute": no_demo_action_maximum,
         "belief_risk_support": risk_coverage,
+        "missing_belief_queries": missing_belief_queries,
+        "rejected_belief_queries": rejected_belief_queries,
         "evaluation_support": coverage,
         "summaries": summaries,
         "progress_summaries": _progress_summaries(rows),
