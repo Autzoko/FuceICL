@@ -1,0 +1,8 @@
+{
+  "schema_version": "bidirectional-slide-demo-baselines-v1",
+  "seed": 20261010,
+  "bootstrap_resamples": 5000,
+  "state_std_floor": 1e-5,
+  "minimum_correct_demo_direction_accuracy": 0.9,
+  "maximum_wrong_demo_direction_accuracy": 0.1
+}
