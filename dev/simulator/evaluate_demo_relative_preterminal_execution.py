@@ -211,6 +211,18 @@ def _coverage(
     }
 
 
+def _displacement_norms(rollout: dict[str, Any]) -> dict[str, float]:
+    """将执行器的三维位移向量转换为共享汇总所需的标量。"""
+    return {
+        "tcp_displacement_norm_m": float(
+            np.linalg.norm(rollout["tcp_displacement_m"])
+        ),
+        "object_displacement_norm_m": float(
+            np.linalg.norm(rollout["object_displacement_m"])
+        ),
+    }
+
+
 def run(
     *,
     project_root: Path,
@@ -438,6 +450,7 @@ def run(
                     "endpoint_error_to_expert_m": None,
                     "action_mse_to_expert": None,
                     "retrieval": None,
+                    **_displacement_norms(expert),
                     **expert,
                 }
             )
@@ -467,6 +480,7 @@ def run(
                             )
                         )["action_mse"],
                         "retrieval": retrieval,
+                        **_displacement_norms(rollout),
                         **rollout,
                     }
                 )
