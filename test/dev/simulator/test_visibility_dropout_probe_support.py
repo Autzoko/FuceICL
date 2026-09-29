@@ -30,7 +30,7 @@ class VisibilityDropoutProbeSupportTest(unittest.TestCase):
             minimum_positive_m=1e-6,
         )
 
-        self.assertEqual(result["accepted_probe"]["frame"], 2)
+        self.assertEqual(result["accepted_probe"]["frame"], 3)
         self.assertEqual(result["rejected_probe"]["frame"], 4)
 
     def test_reports_missing_support_without_fabricating_probe(self) -> None:

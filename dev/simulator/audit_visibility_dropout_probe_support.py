@@ -149,7 +149,9 @@ def run(
         "replay_audit_sha256": _sha256(audit_path),
         "protocol": {
             "dropout_start": "first frame after replay branch",
-            "accepted_probe": "first positive TCP net displacement <= limit",
+            "accepted_probe": (
+                "largest TCP net displacement <= limit before first rejection"
+            ),
             "rejected_probe": "first TCP net displacement > limit",
             "actor_state_used": False,
             "segmentation_or_visibility_used": False,
