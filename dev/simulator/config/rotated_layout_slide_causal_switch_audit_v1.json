@@ -1,0 +1,11 @@
+{
+  "schema_version": "rotated-layout-slide-causal-switch-audit-v1",
+  "expected_pairs": 72,
+  "action_horizon": 6,
+  "progress_samples": 10,
+  "label_probe_frames": 4,
+  "minimum_label_points": 6,
+  "maximum_centroid_error_m": 0.025,
+  "audit_motion_threshold_m": 0.001,
+  "causal_history_frames": 3
+}

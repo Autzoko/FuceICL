@@ -44,13 +44,18 @@ class OcclusionAuditConfig:
     minimum_label_points: int
     maximum_centroid_error_m: float
     audit_motion_threshold_m: float
+    causal_history_frames: int | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "OcclusionAuditConfig":
         return cls(**json.loads(path.read_text(encoding="utf-8")))
 
     def __post_init__(self) -> None:
-        if self.schema_version != "rotated-layout-slide-occlusion-audit-v1":
+        schemas = {
+            "rotated-layout-slide-occlusion-audit-v1",
+            "rotated-layout-slide-causal-switch-audit-v1",
+        }
+        if self.schema_version not in schemas:
             raise ValueError("未知 occlusion audit schema")
         positive = (
             self.expected_pairs,
@@ -63,6 +68,14 @@ class OcclusionAuditConfig:
         )
         if min(positive) <= 0 or self.progress_samples < 2:
             raise ValueError("occlusion audit 配置非法")
+        if self.schema_version.endswith("causal-switch-audit-v1"):
+            if self.causal_history_frames is None:
+                raise ValueError("causal switch 缺少 history frames")
+        if (
+            self.causal_history_frames is not None
+            and self.causal_history_frames <= 0
+        ):
+            raise ValueError("causal history frames 必须为正数")
 
 
 def _git_commit(root: Path) -> str:
@@ -159,6 +172,87 @@ def _tracker_audit(
             metrics["actor_tcp_displacement_cosine"].append(
                 float(np.dot(actor_delta, tcp_delta) / (actor_motion * tcp_motion))
             )
+    return dict(metrics)
+
+
+def _causal_switch_audit(
+    *,
+    centers: list[np.ndarray | None],
+    actor_positions: np.ndarray,
+    tcp_positions: np.ndarray,
+    history_frames: int,
+) -> dict[str, list[float]]:
+    """用遮挡前的反事实预测误差选择 hold 或 TCP propagation。"""
+    metrics: dict[str, list[float]] = defaultdict(list)
+    visible = np.asarray([center is not None for center in centers])
+    for start, end in _missing_runs(visible):
+        if start == 0:
+            raise ValueError("因果 switch 在首次有效观测前遇到遮挡")
+        last_visible = start - 1
+        history_start = last_visible - history_frames
+        history_available = history_start >= 0 and all(
+            center is not None
+            for center in centers[history_start : last_visible + 1]
+        )
+        use_tcp = False
+        if history_available:
+            first_center = centers[history_start]
+            last_center = centers[last_visible]
+            if first_center is None or last_center is None:
+                raise AssertionError("已通过 history availability 检查")
+            hold_history_error = float(
+                np.linalg.norm(last_center - first_center)
+            )
+            tcp_history_error = float(
+                np.linalg.norm(
+                    first_center
+                    + tcp_positions[last_visible]
+                    - tcp_positions[history_start]
+                    - last_center
+                )
+            )
+            use_tcp = tcp_history_error < hold_history_error
+            metrics["history_tcp_minus_hold_error_m"].append(
+                tcp_history_error - hold_history_error
+            )
+        metrics["causal_tcp_selected"].append(float(use_tcp))
+        metrics["causal_history_available"].append(float(history_available))
+
+        last_center = centers[last_visible]
+        if last_center is None:
+            raise AssertionError("missing run 前一帧必须可见")
+        run_candidates: list[tuple[float, float]] = []
+        for index in range(start, end + 1):
+            truth = actor_positions[index]
+            hold = last_center
+            propagated = (
+                last_center
+                + tcp_positions[index]
+                - tcp_positions[last_visible]
+            )
+            hold_error = float(np.linalg.norm(hold - truth))
+            tcp_error = float(np.linalg.norm(propagated - truth))
+            run_candidates.append((hold_error, tcp_error))
+            causal_error = tcp_error if use_tcp else hold_error
+            metrics["causal_switch_error_m"].append(causal_error)
+            metrics["causal_minus_hold_error_m"].append(
+                causal_error - hold_error
+            )
+            metrics["causal_minus_tcp_error_m"].append(
+                causal_error - tcp_error
+            )
+        oracle_index = int(
+            np.mean([value[1] for value in run_candidates])
+            < np.mean([value[0] for value in run_candidates])
+        )
+        metrics["oracle_tcp_selected"].append(float(oracle_index))
+        metrics["causal_mode_correct"].append(float(use_tcp == bool(oracle_index)))
+        metrics["oracle_run_mean_error_m"].append(
+            float(np.mean([value[oracle_index] for value in run_candidates]))
+        )
+        metrics["oracle_switch_error_m"].extend(
+            value[oracle_index] for value in run_candidates
+        )
     return dict(metrics)
 
 
@@ -316,6 +410,14 @@ def run(
                     tcp_positions=tcp_positions,
                     motion_threshold_m=config.audit_motion_threshold_m,
                 )
+                if config.causal_history_frames is not None:
+                    switch = _causal_switch_audit(
+                        centers=centers,
+                        actor_positions=actor_positions["active"][frames],
+                        tcp_positions=tcp_positions,
+                        history_frames=config.causal_history_frames,
+                    )
+                    tracker.update(switch)
                 tracker_rows.append(tracker)
                 row: dict[str, Any] = {
                     "pair_id": int(pair["pair_id"]),
@@ -405,6 +507,16 @@ def run(
         "actor_motion_since_visible_m",
         "tcp_motion_since_visible_m",
         "actor_tcp_displacement_cosine",
+        "history_tcp_minus_hold_error_m",
+        "causal_tcp_selected",
+        "causal_history_available",
+        "causal_switch_error_m",
+        "causal_minus_hold_error_m",
+        "causal_minus_tcp_error_m",
+        "oracle_tcp_selected",
+        "causal_mode_correct",
+        "oracle_run_mean_error_m",
+        "oracle_switch_error_m",
     )
     tracker_report = {
         name: _summary(_flatten(tracker_rows, name)) for name in metric_names
@@ -417,29 +529,31 @@ def run(
     tracker_report["per_trajectory_tcp_minus_hold_mean_m"] = _summary(
         paired_trajectory_differences
     )
-    operation_report: dict[str, Any] = {}
-    for operation in OPERATIONS:
-        indices = [
-            index
-            for index, row in enumerate(trajectory_rows)
-            if row["operation"] == operation
-        ]
-        operation_frames = sum(
+    causal_trajectory_differences = [
+        float(np.mean(row["causal_minus_hold_error_m"]))
+        for row in tracker_rows
+        if row.get("causal_minus_hold_error_m")
+    ]
+    tracker_report["per_trajectory_causal_minus_hold_mean_m"] = _summary(
+        causal_trajectory_differences
+    )
+    def group_report(indices: list[int]) -> dict[str, Any]:
+        group_frames = sum(
             trajectory_rows[index]["query_frames"] for index in indices
         )
-        operation_report[operation] = {
+        return {
             "trajectories": len(indices),
-            "query_frames": operation_frames,
+            "query_frames": group_frames,
             "active_missing_fraction": sum(
                 trajectory_rows[index]["active"]["missing_frames"]
                 for index in indices
             )
-            / operation_frames,
+            / group_frames,
             "anchor_missing_fraction": sum(
                 trajectory_rows[index]["anchor"]["missing_frames"]
                 for index in indices
             )
-            / operation_frames,
+            / group_frames,
             "tracker_audit": {
                 name: _summary(
                     value
@@ -449,6 +563,27 @@ def run(
                 for name in metric_names
             },
         }
+    operation_report = {
+        operation: group_report(
+            [
+                index
+                for index, row in enumerate(trajectory_rows)
+                if row["operation"] == operation
+            ]
+        )
+        for operation in OPERATIONS
+    }
+    split_names = sorted({row["split"] for row in trajectory_rows})
+    split_report = {
+        split: group_report(
+            [
+                index
+                for index, row in enumerate(trajectory_rows)
+                if row["split"] == split
+            ]
+        )
+        for split in split_names
+    }
     report = {
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -468,7 +603,12 @@ def run(
             "tracker_candidates": [
                 "last-observation hold",
                 "unconditional TCP-delta propagation during occlusion",
-            ],
+            ]
+            + (
+                ["causal retrospective-error switch"]
+                if config.causal_history_frames is not None
+                else []
+            ),
             "parameter_tuning_performed": False,
         },
         "summary": {
@@ -481,6 +621,7 @@ def run(
             "visibility": visibility_report,
             "tracker_audit": tracker_report,
             "by_operation": operation_report,
+            "by_split": split_report,
         },
         "trajectories": trajectory_rows,
     }
