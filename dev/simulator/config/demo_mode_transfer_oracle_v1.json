@@ -1,0 +1,13 @@
+{
+  "schema_version": "demo-mode-transfer-oracle-v1",
+  "seed": 20261015,
+  "expected_pairs": 72,
+  "expected_train_pairs": 48,
+  "action_horizon": 6,
+  "label_probe_frames": 4,
+  "minimum_label_points": 6,
+  "maximum_centroid_error_m": 0.025,
+  "top_k": 5,
+  "bootstrap_samples": 2000,
+  "minimum_recoverable_gap_fraction": 0.25
+}
