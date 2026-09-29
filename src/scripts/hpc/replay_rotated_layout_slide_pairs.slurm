@@ -17,7 +17,12 @@ readonly OUTPUT_ROOT="${3:?new replay dataset root is required}"
 readonly CONFIG_PATH="${4:?replay audit config is required}"
 readonly PYTHON_BIN="/scratch/ll5582/conda/envs/FuseICL-maniskill/bin/python"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
-readonly REPLAY_COUNT="72"
+readonly REPLAY_COUNT="${5:-72}"
+
+if [[ ! "${REPLAY_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "replay count 必须为正整数" >&2
+    exit 2
+fi
 
 if [[ -e "${OUTPUT_ROOT}" ]]; then
     echo "输出目录已存在，拒绝覆盖：${OUTPUT_ROOT}" >&2

@@ -1,0 +1,15 @@
+{
+  "schema_version": "rotated-layout-slide-predictor-data-v1",
+  "seed": 20261004,
+  "expected_pairs": 24,
+  "action_horizon": 6,
+  "active_points": 128,
+  "anchor_points": 64,
+  "label_probe_frames": 4,
+  "minimum_label_points": 6,
+  "maximum_centroid_error_m": 0.025,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "paired_observation_tolerance": 1e-6,
+  "maximum_layout_axis_error_degrees": 10.0
+}
