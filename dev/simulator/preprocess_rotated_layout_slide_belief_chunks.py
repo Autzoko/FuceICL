@@ -47,6 +47,9 @@ from src.components.retriever.belief_tracker import (
     VisibilityConditionedBeliefTracker,
     belief_risk_accepted as _belief_risk_accepted,
 )
+from dev.simulator.visibility_dropout_probe import (
+    select_visibility_dropout_probes,
+)
 
 
 STATE_FEATURES = ANCHOR_STATE_FEATURES + (
@@ -76,6 +79,8 @@ class BeliefChunkConfig:
     maximum_layout_axis_error_degrees: float
     progress_fraction_maximum: float = 1.0
     belief_risk_gate_maximum_tcp_net_displacement_m: float | None = None
+    dropout_risk_probe_enabled: bool = False
+    dropout_risk_probe_minimum_positive_displacement_m: float = 0.000001
 
     @classmethod
     def from_json(cls, path: Path) -> "BeliefChunkConfig":
@@ -114,6 +119,21 @@ class BeliefChunkConfig:
             and self.belief_risk_gate_maximum_tcp_net_displacement_m <= 0.0
         ):
             raise ValueError("belief risk gate 位移门槛必须为正")
+        if not isinstance(self.dropout_risk_probe_enabled, bool):
+            raise TypeError("dropout_risk_probe_enabled 必须是 bool")
+        if self.dropout_risk_probe_minimum_positive_displacement_m <= 0.0:
+            raise ValueError("dropout risk probe 最小正位移必须为正")
+        if (
+            self.dropout_risk_probe_enabled
+            and self.belief_risk_gate_maximum_tcp_net_displacement_m is None
+        ):
+            raise ValueError("dropout risk probe 必须启用 belief risk gate")
+        if (
+            self.belief_risk_gate_maximum_tcp_net_displacement_m is not None
+            and self.dropout_risk_probe_minimum_positive_displacement_m
+            >= self.belief_risk_gate_maximum_tcp_net_displacement_m
+        ):
+            raise ValueError("dropout risk probe 最小位移必须小于 gate 阈值")
 
 
 def _belief_frames(
@@ -272,6 +292,8 @@ def run(
     label_probe_errors = []
     risk_accepted_count = 0
     risk_rejected_rows: list[dict[str, Any]] = []
+    dropout_probe_rows: list[dict[str, Any]] = []
+    dropout_support_rows: list[dict[str, Any]] = []
     try:
         for pair in pair_rows:
             pair_id = int(pair["pair_id"])
@@ -374,6 +396,97 @@ def run(
                     frames=frames,
                     minimum_points=config.minimum_label_points,
                 )
+                if config.dropout_risk_probe_enabled:
+                    risk_threshold = (
+                        config.belief_risk_gate_maximum_tcp_net_displacement_m
+                    )
+                    minimum_probe_displacement = (
+                        config.dropout_risk_probe_minimum_positive_displacement_m
+                    )
+                    selection = select_visibility_dropout_probes(
+                        tcp_poses[:, :3],
+                        branch=branch,
+                        last_h6_start=len(actions) - config.action_horizon,
+                        accepted_limit_m=risk_threshold,
+                        minimum_positive_m=minimum_probe_displacement,
+                    )
+                    dropout_support_rows.append(
+                        {
+                            "pair_id": pair_id,
+                            "seed": seed,
+                            "operation": operation,
+                            **selection,
+                        }
+                    )
+                    selected = {
+                        int(value["frame"]): role
+                        for role, value in (
+                            ("accepted", selection["accepted_probe"]),
+                            ("rejected", selection["rejected_probe"]),
+                        )
+                        if value is not None
+                    }
+                    if selected:
+                        dropout_tracker = VisibilityConditionedBeliefTracker(
+                            minimum_visible_points=config.minimum_label_points
+                        )
+                        dropout_tracker.update(
+                            memory_points["active"], tcp_poses[branch, :3]
+                        )
+                        for dropout_frame in range(
+                            branch + 1,
+                            max(selected) + 1,
+                        ):
+                            dropout_belief = dropout_tracker.update(
+                                np.empty((0, 3), dtype=np.float64),
+                                tcp_poses[dropout_frame, :3],
+                            )
+                            role = selected.get(dropout_frame)
+                            if role is None:
+                                continue
+                            dropout_displacement = (
+                                dropout_belief.tcp_net_displacement_since_visible_m
+                            )
+                            accepted = _belief_risk_accepted(
+                                visible=dropout_belief.visible,
+                                tcp_net_displacement_m=dropout_displacement,
+                                maximum_tcp_net_displacement_m=risk_threshold,
+                            )
+                            if accepted != (role == "accepted"):
+                                raise RuntimeError(
+                                    "dropout probe role 与解析 gate 不一致"
+                                )
+                            error = float(
+                                np.linalg.norm(
+                                    dropout_belief.center_world
+                                    - actor_positions["active"][dropout_frame]
+                                )
+                            )
+                            if (
+                                accepted
+                                and error > config.maximum_belief_error_m
+                            ):
+                                raise ValueError(
+                                    f"seed={seed} dropout accepted belief "
+                                    f"error={error:.4f} m 超限"
+                                )
+                            dropout_probe_rows.append(
+                                {
+                                    "pair_id": pair_id,
+                                    "seed": seed,
+                                    "operation": operation,
+                                    "role": role,
+                                    "frame": dropout_frame,
+                                    "belief_age_steps": (
+                                        dropout_belief.age_steps
+                                    ),
+                                    "tcp_net_displacement_m": (
+                                        dropout_displacement
+                                    ),
+                                    "belief_error_m": error,
+                                    "risk_accepted": accepted,
+                                }
+                            )
                 for progress_index, frame in enumerate(frames):
                     belief = beliefs[frame]
                     belief_error = float(
@@ -556,6 +669,26 @@ def run(
             stream.write(json.dumps(row, sort_keys=True) + "\n")
     observed_errors = belief_errors[True]
     propagated_errors = belief_errors[False]
+    accepted_dropout = [
+        row for row in dropout_probe_rows if row["role"] == "accepted"
+    ]
+    rejected_dropout = [
+        row for row in dropout_probe_rows if row["role"] == "rejected"
+    ]
+
+    def dropout_stats(
+        rows: list[dict[str, Any]],
+        field: str,
+    ) -> dict[str, float] | None:
+        if not rows:
+            return None
+        values = np.asarray([row[field] for row in rows], dtype=np.float64)
+        return {
+            "minimum": float(values.min()),
+            "median": float(np.median(values)),
+            "maximum": float(values.max()),
+        }
+
     report = {
         "schema_version": 1,
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -595,6 +728,12 @@ def run(
                 is not None
                 else None
             ),
+            "dropout_risk_probe": (
+                "force missing after branch; select boundary accepted and first "
+                "rejected frame using only TCP net displacement"
+                if config.dropout_risk_probe_enabled
+                else None
+            ),
         },
         "rows": expected_rows,
         "pairs": config.expected_pairs,
@@ -632,6 +771,36 @@ def run(
             "coverage": risk_accepted_count / expected_rows,
             "rejected": risk_rejected_rows,
             "privileged_error_used_for_gate": False,
+        },
+        "dropout_risk_probe": {
+            "enabled": config.dropout_risk_probe_enabled,
+            "dropout_start": "first frame after replay branch",
+            "selection_uses_actor_state": False,
+            "gate_uses_actor_error": False,
+            "expected_trajectories": (
+                config.expected_pairs * len(OPERATIONS)
+            ),
+            "accepted_probe_trajectories": len(accepted_dropout),
+            "rejected_probe_trajectories": len(rejected_dropout),
+            "both_probe_trajectories": sum(
+                row["accepted_probe"] is not None
+                and row["rejected_probe"] is not None
+                for row in dropout_support_rows
+            ),
+            "accepted_tcp_net_displacement_m": dropout_stats(
+                accepted_dropout, "tcp_net_displacement_m"
+            ),
+            "rejected_tcp_net_displacement_m": dropout_stats(
+                rejected_dropout, "tcp_net_displacement_m"
+            ),
+            "accepted_belief_error_m": dropout_stats(
+                accepted_dropout, "belief_error_m"
+            ),
+            "rejected_belief_error_m": dropout_stats(
+                rejected_dropout, "belief_error_m"
+            ),
+            "support": dropout_support_rows,
+            "probes": dropout_probe_rows,
         },
         "files": {},
     }
