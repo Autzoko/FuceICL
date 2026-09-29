@@ -114,6 +114,8 @@ class ActiveBelief:
     visible: bool
     age_steps: int
     observed_point_count: int
+    tcp_net_displacement_since_visible_m: float
+    tcp_path_length_since_visible_m: float
 
 
 def _belief_frames(
@@ -163,6 +165,8 @@ def _active_beliefs(
     points: np.ndarray | None = None
     center: np.ndarray | None = None
     age = 0
+    last_visible_tcp: np.ndarray | None = None
+    tcp_path_length = 0.0
     for frame in range(branch, max(frames) + 1):
         observed = _segmented_points(xyzw[frame], segmentation[frame], label)
         visible = len(observed) >= minimum_points
@@ -170,20 +174,34 @@ def _active_beliefs(
             points = np.asarray(observed, dtype=np.float64)
             center = points.mean(axis=0)
             age = 0
+            last_visible_tcp = tcp_positions[frame].copy()
+            tcp_path_length = 0.0
         else:
-            if points is None or center is None or frame == branch:
+            if (
+                points is None
+                or center is None
+                or last_visible_tcp is None
+                or frame == branch
+            ):
                 raise ValueError("active belief 缺少可传播的因果测量")
             delta = tcp_positions[frame] - tcp_positions[frame - 1]
             points = points + delta
             center = center + delta
             age += 1
+            tcp_path_length += float(np.linalg.norm(delta))
         if frame in requested:
+            if last_visible_tcp is None:
+                raise RuntimeError("active belief 缺少 last-visible TCP")
             beliefs[frame] = ActiveBelief(
                 points_world=points.copy(),
                 center_world=center.copy(),
                 visible=visible,
                 age_steps=age,
                 observed_point_count=len(observed),
+                tcp_net_displacement_since_visible_m=float(
+                    np.linalg.norm(tcp_positions[frame] - last_visible_tcp)
+                ),
+                tcp_path_length_since_visible_m=tcp_path_length,
             )
     if set(beliefs) != requested:
         raise ValueError("belief 固定帧不完整")
@@ -468,6 +486,12 @@ def run(
                             "frame": frame,
                             "active_visible": belief.visible,
                             "belief_age_steps": belief.age_steps,
+                            "tcp_net_displacement_since_visible_m": (
+                                belief.tcp_net_displacement_since_visible_m
+                            ),
+                            "tcp_path_length_since_visible_m": (
+                                belief.tcp_path_length_since_visible_m
+                            ),
                             "observed_active_points": (
                                 belief.observed_point_count
                             ),
