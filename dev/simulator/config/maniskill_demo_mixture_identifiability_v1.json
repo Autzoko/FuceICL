@@ -1,0 +1,36 @@
+{
+  "schema_version": "maniskill-demo-mixture-identifiability-v1",
+  "seed": 20261005,
+  "source_checkpoint_sha256": "015d57a36f57f65ae310376badd3781621efa402d90f9b378b1cd75375e2b143",
+  "candidate_count": 4,
+  "expected_episodes_per_split_per_task": 12,
+  "ridge_l2": 1.0,
+  "bootstrap_resamples": 10000,
+  "feature_names": [
+    "action_span_diameter",
+    "mean_pairwise_action_disagreement",
+    "rank1_retrieval_distance",
+    "rank2_rank1_distance_gap",
+    "retrieval_distance_mean",
+    "retrieval_distance_std",
+    "retrieval_prior_entropy",
+    "previous_candidate_set_churn",
+    "previous_top1_episode_switch",
+    "previous_query_geometry_step_l2",
+    "has_previous_query"
+  ],
+  "query_summary_sha256": {
+    "PickCube-v1": "446d6161f7f232838ea4b0dcb7cc73d060c0c7a306997af269627a796437c432",
+    "PushCube-v1": "ba12656691ad73e0d8db10b779c04948bf3490e15522cfda588d29e2d5de60ee",
+    "PullCube-v1": "7e7ceefe2a938b01991bc75d177fb8c90f138df9e5c2c7bb8fba49e9d7036ae9"
+  },
+  "query_audit_sha256": {
+    "PickCube-v1": "249424940d2e6fc0e570793e3dde80a20d61fddfaf3219332923a15f17e5e1f7",
+    "PushCube-v1": "e0dcd018c56eb6a38012e0298cf328bc2faa63e3f6e86ee326c753812d081837",
+    "PullCube-v1": "d3dc3e6ecff68c94570007b74354bfc9d73b46e2591197ca762be069bde6f71a"
+  },
+  "pooled_auc_minimum": 0.6,
+  "task_heldout_mean_auc_minimum": 0.58,
+  "minimum_improved_tasks": 2,
+  "minimum_positive_task_heldout_auc": 2
+}
