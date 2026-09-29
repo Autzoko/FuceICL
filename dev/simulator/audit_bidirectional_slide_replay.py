@@ -274,8 +274,23 @@ def run(
     for operation in ("left", "right"):
         if set(source_episodes[operation]) != expected_seeds:
             raise ValueError(f"{operation} source episode seeds 不完整")
-        if set(replay_episodes[operation]) != expected_seeds:
-            raise ValueError(f"{operation} replay episode seeds 不完整")
+    replay_seed_sets = {
+        operation: set(episodes)
+        for operation, episodes in replay_episodes.items()
+    }
+    missing_replay_seeds = {
+        operation: sorted(expected_seeds - seeds)
+        for operation, seeds in replay_seed_sets.items()
+    }
+    unexpected_replay_seeds = {
+        operation: sorted(seeds - expected_seeds)
+        for operation, seeds in replay_seed_sets.items()
+    }
+    common_replay_seeds = expected_seeds.intersection(
+        *replay_seed_sets.values()
+    )
+    if not common_replay_seeds:
+        raise ValueError("left/right replay 没有可配对的共同 seed")
 
     pairs = []
     source_handles = {
@@ -289,6 +304,8 @@ def run(
     try:
         for row in accepted:
             seed = int(row["seed"])
+            if seed not in common_replay_seeds:
+                continue
             source = {
                 operation: _trajectory(
                     source_handles[operation],
@@ -489,9 +506,16 @@ def run(
         for row in pairs
     )
     goal_leaf_count = sum(len(row["goal_observation_leaves"]) for row in pairs)
+    replay_complete = all(
+        not missing_replay_seeds[operation]
+        and not unexpected_replay_seeds[operation]
+        for operation in ("left", "right")
+    )
     criteria = {
         "P1_complete_successful_pairs": (
-            len(pairs) == config.expected_pairs and all(terminal_success)
+            replay_complete
+            and len(pairs) == config.expected_pairs
+            and all(terminal_success)
         ),
         "P2_identical_goal_free_branch_observation": (
             maximum_observation_error <= config.observation_tolerance
@@ -511,7 +535,10 @@ def run(
         ),
     }
     summary = {
-        "pairs": len(pairs),
+        "expected_pairs": config.expected_pairs,
+        "paired_replay_pairs": len(pairs),
+        "missing_replay_seeds": missing_replay_seeds,
+        "unexpected_replay_seeds": unexpected_replay_seeds,
         "terminal_success_fraction": _fraction(terminal_success),
         "maximum_branch_observation_error": maximum_observation_error,
         "goal_observation_leaf_count": goal_leaf_count,
