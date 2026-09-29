@@ -1,0 +1,115 @@
+{
+  "schema_version": "relation-effect-head-v1",
+  "seed": 20261009,
+  "hidden_dim": 64,
+  "epochs": 250,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "early_stopping_patience": 30,
+  "parse_batch_size": 16,
+  "encode_batch_size": 64,
+  "conformal_alpha": 0.05,
+  "minimum_validation_accuracy": 0.95,
+  "minimum_calibration_coverage": 0.95,
+  "minimum_calibration_singleton_rate": 0.8,
+  "maximum_parameters": 50000,
+  "object_pairs": [
+    ["blue block", "yellow target"],
+    ["orange puck", "white landmark"],
+    ["wooden cube", "black marker"],
+    ["small cylinder", "silver post"],
+    ["plastic piece", "round beacon"],
+    ["purple box", "gray disc"],
+    ["metal part", "striped marker"],
+    ["foam brick", "square target"],
+    ["cyan object", "circular landmark"],
+    ["large block", "tiny beacon"],
+    ["striped cube", "orange target"],
+    ["white puck", "blue marker"],
+    ["yellow cylinder", "purple post"],
+    ["gray piece", "wooden landmark"],
+    ["round object", "metal beacon"],
+    ["square part", "green target"]
+  ],
+  "templates": {
+    "train": {
+      "approach": [
+        "Move the {active} toward the {reference}.",
+        "Push the {active} toward the {reference}.",
+        "Bring the {active} closer to the {reference}.",
+        "Shift the {active} nearer to the {reference}.",
+        "Decrease the distance between the {active} and the {reference}.",
+        "Shorten the gap from the {active} to the {reference}.",
+        "Make the {active} approach the {reference}.",
+        "Move the {active} so the two objects become closer."
+      ],
+      "separate": [
+        "Move the {active} away from the {reference}.",
+        "Push the {active} away from the {reference}.",
+        "Move the {active} farther from the {reference}.",
+        "Shift the {active} farther away from the {reference}.",
+        "Increase the distance between the {active} and the {reference}.",
+        "Lengthen the gap from the {active} to the {reference}.",
+        "Make the {active} retreat from the {reference}.",
+        "Move the {active} so the two objects become farther apart."
+      ],
+      "other": [
+        "Pick up the {active}.",
+        "Rotate the {active} in place.",
+        "Move the {active}.",
+        "Put the {active} beside the {reference}.",
+        "Touch the {reference} with the {active}.",
+        "Lift the {active} above the table.",
+        "Hold the {active} still.",
+        "Place the {active} at the marked location."
+      ]
+    },
+    "validation": {
+      "approach": [
+        "Reduce the separation between the {active} and the {reference}.",
+        "Cause the {active} and the {reference} positions to converge.",
+        "Make the distance from the {active} to the {reference} smaller.",
+        "Bring the {active} into proximity with the {reference}.",
+        "Move the {active} until it is less separated from the {reference}."
+      ],
+      "separate": [
+        "Enlarge the separation between the {active} and the {reference}.",
+        "Cause the {active} and the {reference} positions to diverge.",
+        "Make the distance from the {active} to the {reference} larger.",
+        "Move the {active} out of proximity with the {reference}.",
+        "Move the {active} until it is more separated from the {reference}."
+      ],
+      "other": [
+        "Stack the {active} on the {reference}.",
+        "Put the {active} next to the {reference}.",
+        "Lift the {active} over the {reference}.",
+        "Tap the {reference} using the {active}.",
+        "Keep the distance between the {active} and the {reference} unchanged."
+      ]
+    },
+    "calibration": {
+      "approach": [
+        "Close the space between the {active} and the {reference}.",
+        "Diminish the gap between the {active} and the {reference}.",
+        "Move the {active} so it is no longer far from the {reference}.",
+        "Move the {active} while avoiding any increase in distance to the {reference}.",
+        "Advance the {active} toward the {reference}."
+      ],
+      "separate": [
+        "Widen the space between the {active} and the {reference}.",
+        "Expand the gap between the {active} and the {reference}.",
+        "Move the {active} so it is no longer near the {reference}.",
+        "Move the {active} while avoiding any decrease in distance to the {reference}.",
+        "Withdraw the {active} from the {reference}."
+      ],
+      "other": [
+        "Maintain the current distance between the {active} and the {reference}.",
+        "Move the {active} parallel to the {reference}.",
+        "Keep holding the {active}.",
+        "Circle the {active} around the {reference}.",
+        "Place the {active} halfway across the table."
+      ]
+    }
+  }
+}
