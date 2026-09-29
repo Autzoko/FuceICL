@@ -9,13 +9,12 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
-source /etc/profile
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"
 readonly CONFIG_PATH="${2:?paired collection config is required}"
 readonly OUTPUT_ROOT="${3:?new paired dataset root is required}"
-readonly ENV_NAME="FuseICL-maniskill"
+readonly PYTHON_BIN="/scratch/ll5582/conda/envs/FuseICL-maniskill/bin/python"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 
 if [[ -e "${OUTPUT_ROOT}" ]]; then
@@ -23,8 +22,7 @@ if [[ -e "${OUTPUT_ROOT}" ]]; then
     exit 2
 fi
 
-module purge
-module load miniconda/3-4.11.0
+test -x "${PYTHON_BIN}"
 mkdir -p \
     /scratch/ll5582/data/ManiSkill3/logs \
     "$(dirname "${OUTPUT_ROOT}")" \
@@ -39,8 +37,7 @@ export TORCH_HOME="${CACHE_ROOT}/torch"
 export HF_HOME="${CACHE_ROOT}/huggingface"
 
 cd "${PROJECT_ROOT}"
-conda run --no-capture-output -n "${ENV_NAME}" \
-    python -m dev.simulator.generate_bidirectional_slide_pairs \
+"${PYTHON_BIN}" -m dev.simulator.generate_bidirectional_slide_pairs \
     --project-root "${PROJECT_ROOT}" \
     --config "${CONFIG_PATH}" \
     --output-root "${OUTPUT_ROOT}"

@@ -9,14 +9,13 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
-source /etc/profile
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"
 readonly SOURCE_ROOT="${2:?paired source dataset root is required}"
 readonly OUTPUT_ROOT="${3:?new replay dataset root is required}"
 readonly CONFIG_PATH="${4:?replay audit config is required}"
-readonly ENV_NAME="FuseICL-maniskill"
+readonly PYTHON_BIN="/scratch/ll5582/conda/envs/FuseICL-maniskill/bin/python"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 readonly REPLAY_COUNT="48"
 
@@ -29,8 +28,7 @@ for operation in left right; do
     test -s "${SOURCE_ROOT}/${operation}/trajectory.json"
 done
 
-module purge
-module load miniconda/3-4.11.0
+test -x "${PYTHON_BIN}"
 mkdir -p \
     /scratch/ll5582/data/ManiSkill3/logs \
     "${OUTPUT_ROOT}/left" \
@@ -51,8 +49,7 @@ for operation in left right; do
         "${OUTPUT_ROOT}/${operation}/trajectory.h5"
     cp "${SOURCE_ROOT}/${operation}/trajectory.json" \
         "${OUTPUT_ROOT}/${operation}/trajectory.json"
-    conda run --no-capture-output -n "${ENV_NAME}" \
-        python -m dev.simulator.replay_bidirectional_slide \
+    "${PYTHON_BIN}" -m dev.simulator.replay_bidirectional_slide \
         --traj-path "${OUTPUT_ROOT}/${operation}/trajectory.h5" \
         --sim-backend physx_cpu \
         --obs-mode pointcloud \
@@ -66,8 +63,7 @@ for operation in left right; do
         --num-envs 1
 done
 
-conda run --no-capture-output -n "${ENV_NAME}" \
-    python -m dev.simulator.audit_bidirectional_slide_replay \
+"${PYTHON_BIN}" -m dev.simulator.audit_bidirectional_slide_replay \
     --project-root "${PROJECT_ROOT}" \
     --config "${CONFIG_PATH}" \
     --source-root "${SOURCE_ROOT}" \
