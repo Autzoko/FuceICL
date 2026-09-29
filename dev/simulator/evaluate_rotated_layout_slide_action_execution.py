@@ -28,9 +28,6 @@ from dev.simulator.evaluate_rotated_layout_slide_demo_policy_confirmation import
     _load_data,
     _load_policy,
 )
-from dev.simulator.evaluate_rotated_layout_slide_retrieval_stack import (
-    _nearest_demo,
-)
 from dev.simulator.evaluate_rotated_layout_slide_transport import (
     OPERATIONS,
     SPLITS,
@@ -130,6 +127,25 @@ def _stats(values: list[float]) -> dict[str, float | int]:
         "p95": float(np.quantile(array, 0.95)),
         "maximum": float(array.max()),
     }
+
+
+def _nearest_demo(
+    query_state: np.ndarray,
+    bank_data: dict[str, np.ndarray],
+    bank_indices: np.ndarray,
+    operation_id: int,
+    state_std: np.ndarray,
+) -> tuple[int, float]:
+    """在 typed operation bucket 内按冻结状态尺度选择最近 Demo。"""
+    candidates = bank_indices[
+        bank_data["operation_id"][bank_indices] == operation_id
+    ]
+    if not len(candidates):
+        raise ValueError(f"operation={operation_id} 没有候选 Demo")
+    normalized = (bank_data["state"][candidates] - query_state) / state_std
+    distances = np.mean(normalized.astype(np.float64) ** 2, axis=1)
+    nearest = int(np.argmin(distances))
+    return int(candidates[nearest]), float(distances[nearest])
 
 
 def _load_replay(
