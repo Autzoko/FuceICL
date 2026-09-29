@@ -122,7 +122,7 @@ def _subset_metrics(
     mask: np.ndarray,
 ) -> dict[str, dict[str, float]]:
     if not bool(mask.any()):
-        raise ValueError("评价子集为空")
+        return {}
     return {
         name: _strip_rows(_metrics(value[mask], target[mask]))
         for name, value in predictions.items()
@@ -262,11 +262,15 @@ def run(
     shuffled_mse = float(
         overall["same_operation_shuffled_transport"]["action_mse"]
     )
-    large_raw_mse = float(
-        large_yaw_metrics["raw_nearest_copy"]["action_mse"]
+    large_raw_mse = (
+        float(large_yaw_metrics["raw_nearest_copy"]["action_mse"])
+        if large_yaw_metrics
+        else None
     )
-    large_point_mse = float(
-        large_yaw_metrics["point_transport"]["action_mse"]
+    large_point_mse = (
+        float(large_yaw_metrics["point_transport"]["action_mse"])
+        if large_yaw_metrics
+        else None
     )
     pair_ids = data["pair_id"][query_rows_array]
     point_per_row = _metrics(
@@ -296,8 +300,10 @@ def run(
         "point_vs_shuffled": _relative_improvement(
             point_mse, shuffled_mse
         ),
-        "large_yaw_point_vs_raw": _relative_improvement(
-            large_point_mse, large_raw_mse
+        "large_yaw_point_vs_raw": (
+            _relative_improvement(large_point_mse, large_raw_mse)
+            if large_point_mse is not None and large_raw_mse is not None
+            else None
         ),
     }
     criteria = {
@@ -314,8 +320,11 @@ def run(
         ),
         "P3_large_yaw_transport": (
             int(large_yaw.sum()) >= config.minimum_large_yaw_rows
+            and bool(large_yaw_metrics)
             and large_yaw_metrics["point_transport"]["direction_accuracy"]
             >= config.minimum_large_yaw_direction_accuracy
+            and improvements["large_yaw_point_vs_raw"]
+            is not None
             and improvements["large_yaw_point_vs_raw"]
             >= config.minimum_large_yaw_relative_mse_improvement
         ),
@@ -405,9 +414,9 @@ def run(
                 "progress_retrieval": progress_summary,
                 "relative_mse_improvements": improvements,
                 "point_transport": overall["point_transport"],
-                "large_yaw_point_transport": large_yaw_metrics[
+                "large_yaw_point_transport": large_yaw_metrics.get(
                     "point_transport"
-                ],
+                ),
                 "bootstrap": bootstrap,
                 "criteria": criteria,
                 "all_criteria_passed": all(criteria.values()),
