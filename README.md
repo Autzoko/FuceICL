@@ -135,3 +135,7 @@ prediction = predictor.predict(
 
 这个接口刻意不接收 raw RGB、重复点云、多套物体位置或未校准的候选 mixture。它是已确认 top-1 Predictor 的稳定基线，
 不阻止后续在独立证据支持后增加多 Demo 模型。
+
+`transport_planar_layout_action` 使用 point-derived 有向 layout axis 与 Demo/query TCP rotation，在调用上述推理接口前
+把 Demo translation 和 axis-angle 映射到 query EEF frame；gripper target 不变。调用方必须使用观测或因果缓存的
+layout axis，不能传 simulator hidden goal/pose。

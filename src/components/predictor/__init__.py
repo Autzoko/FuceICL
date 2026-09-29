@@ -10,6 +10,7 @@ from .layout_equivariant_policy import (
     LayoutEquivariantDemoPolicy,
     LayoutEquivariantDemoPolicyConfig,
 )
+from .layout_transport import transport_planar_layout_action
 
 __all__ = [
     "ActionChunkPrediction",
@@ -18,4 +19,5 @@ __all__ = [
     "LayoutEquivariantDemoPolicyConfig",
     "PreparedDemoContext",
     "RetrievalAugmentedActionPredictor",
+    "transport_planar_layout_action",
 ]
