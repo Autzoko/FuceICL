@@ -12,6 +12,13 @@ from .task_router import (
 )
 
 if TYPE_CHECKING:
+    from .belief_demo_retriever import (
+        BeliefDemoCandidate,
+        BeliefDemoHit,
+        BeliefDemoQuery,
+        BeliefDemoRetrievalResult,
+        ExactBeliefDemoRetriever,
+    )
     from .belief_tracker import (
         ObjectBeliefEstimate,
         VisibilityConditionedBeliefTracker,
@@ -63,6 +70,16 @@ _BELIEF_EXPORTS = frozenset(
     }
 )
 
+_BELIEF_RETRIEVER_EXPORTS = frozenset(
+    {
+        "BeliefDemoCandidate",
+        "BeliefDemoHit",
+        "BeliefDemoQuery",
+        "BeliefDemoRetrievalResult",
+        "ExactBeliefDemoRetriever",
+    }
+)
+
 
 def __getattr__(name: str) -> Any:
     """按需加载文本模型或 embedding 检索依赖。"""
@@ -72,6 +89,8 @@ def __getattr__(name: str) -> Any:
         from . import embedding_retriever as module
     elif name in _BELIEF_EXPORTS:
         from . import belief_tracker as module
+    elif name in _BELIEF_RETRIEVER_EXPORTS:
+        from . import belief_demo_retriever as module
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(module, name)
@@ -79,12 +98,17 @@ def __getattr__(name: str) -> Any:
     return value
 
 __all__ = [
+    "BeliefDemoCandidate",
+    "BeliefDemoHit",
+    "BeliefDemoQuery",
+    "BeliefDemoRetrievalResult",
     "EmbeddingCandidate",
     "EmbeddingQuery",
     "EmbeddingRetrievalHit",
     "EmbeddingRetrievalResult",
     "EmbeddingRetrieverConfig",
     "ExactEmbeddingRetriever",
+    "ExactBeliefDemoRetriever",
     "ObjectBeliefEstimate",
     "TextCandidate",
     "TextRetrievalHit",
