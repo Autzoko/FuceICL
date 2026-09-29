@@ -81,6 +81,7 @@ class RunRecord:
     split: str
     operation: str
     run_index: int
+    onset_step: int
     onset_progress: float
     initial_key: np.ndarray
     hold_errors: np.ndarray
@@ -258,6 +259,7 @@ def _extract_runs(
                             split=split,
                             operation=operation,
                             run_index=run_index,
+                            onset_step=start,
                             onset_progress=start / (len(frames) - 1),
                             initial_key=initial_key,
                             hold_errors=np.asarray(hold_errors),
