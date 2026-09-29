@@ -1,0 +1,16 @@
+{
+  "schema_version": "rotated-layout-slide-action-execution-v1",
+  "seed": 20261012,
+  "expected_pairs": 16,
+  "action_horizon": 6,
+  "bootstrap_resamples": 10000,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "maximum_branch_alignment_error_m": 0.002,
+  "maximum_expert_endpoint_error_m": 0.002,
+  "minimum_axis_projection_m": 0.002,
+  "minimum_policy_direction_accuracy": 0.95,
+  "maximum_wrong_operation_direction_accuracy": 0.1,
+  "minimum_endpoint_error_improvement": 0.05,
+  "maximum_no_demo_displacement_m": 0.001
+}
