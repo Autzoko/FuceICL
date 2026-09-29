@@ -1,6 +1,6 @@
-"""旧实验路径的兼容入口；稳定实现位于 ``src.components``。"""
+"""轻量、严格依赖 Demo 的 action-chunk Predictor 公共接口。"""
 
-from src.components.predictor import (
+from .layout_equivariant_policy import (
     LayoutEquivariantDemoPolicy,
     LayoutEquivariantDemoPolicyConfig,
 )

@@ -84,3 +84,27 @@ assert local_result.accepted
 
 `minimum_score` 默认为空，因为拒绝阈值必须由独立 calibration 数据确定，不能在组件中硬编码。未知 task key、低于已配置
 阈值以及未建立索引均有独立的可审计行为。
+
+## Demo-anchored Action Predictor
+
+当前稳定 Predictor 是 `LayoutEquivariantDemoPolicy`：输入 query/demo state 和已经过 layout frame transport 的
+Demo H-step action，网络只能输出有界 residual；没有独立的 query-only action head。
+
+```python
+import torch
+
+from src.components.predictor import LayoutEquivariantDemoPolicy
+
+policy = LayoutEquivariantDemoPolicy()
+action_chunk = policy(
+    query_state=torch.zeros(1, 21),
+    demo_state=torch.zeros(1, 21),
+    transported_demo_action=torch.zeros(1, 6, 7),
+    demo_mask=torch.ones(1),
+)
+assert policy.parameter_count == 11_940
+```
+
+默认模型无 Demo 时严格输出零，相同 query/demo state 时严格返回 transported Demo action，gripper action 不被
+residual 修改。当前已确认 checkpoint 仍使用 21D 单帧几何状态；覆盖完整轨迹前必须先解决物体遮挡下的因果 belief，
+不能把 simulator pose 直接填入该接口。
