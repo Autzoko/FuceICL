@@ -1,0 +1,43 @@
+{
+  "schema_version": "maniskill-demo-set-barycentric-transport-v1",
+  "seed": 20261006,
+  "source_checkpoint_sha256": "015d57a36f57f65ae310376badd3781621efa402d90f9b378b1cd75375e2b143",
+  "radm_checkpoint_sha256": "033614d61b1a64e27e5b6851cc338bea0a62204d0ea17f2f56724b45e418082f",
+  "operator_train_episodes": [
+    0, 1, 2, 3, 4, 5, 6, 7, 12, 14,
+    15, 16, 17, 18, 19, 20, 21, 24, 25, 26
+  ],
+  "mixture_train_episodes": [28, 29, 30, 31],
+  "validation_episodes": [8, 9, 10, 11, 13, 22, 23, 27],
+  "candidate_count": 4,
+  "action_horizon": 6,
+  "epochs": 80,
+  "batch_size": 128,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.0001,
+  "token_dim": 48,
+  "scorer_hidden_dim": 32,
+  "maximum_odds_distortion": 4.0,
+  "gradient_clip_norm": 1.0,
+  "bootstrap_resamples": 10000,
+  "latency_iterations": 200,
+  "primary_variant": "set_step",
+  "variants": {
+    "set_step": {
+      "use_set_context": true,
+      "per_step_weights": true
+    },
+    "independent_step": {
+      "use_set_context": false,
+      "per_step_weights": true
+    },
+    "set_global": {
+      "use_set_context": true,
+      "per_step_weights": false
+    }
+  },
+  "maximum_new_model_parameters": 10000,
+  "maximum_total_parameters": 250000,
+  "maximum_latency_p95_ms": 10.0,
+  "minimum_improved_tasks": 2
+}
