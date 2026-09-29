@@ -108,3 +108,30 @@ assert policy.parameter_count == 11_940
 默认模型无 Demo 时严格输出零，相同 query/demo state 时严格返回 transported Demo action，gripper action 不被
 residual 修改。当前已确认 checkpoint 仍使用 21D 单帧几何状态；覆盖完整轨迹前必须先解决物体遮挡下的因果 belief，
 不能把 simulator pose 直接填入该接口。
+
+线上 Retriever 与 Predictor 通过 `PreparedDemoContext` 连接。上游只传一个已经完成 layout transport 的 Demo，检索
+分数仅写入输出 provenance，不作为网络特征；检索拒绝时显式传 `demo=None`：
+
+```python
+from src.components.predictor import (
+    ActionChunkRequest,
+    PreparedDemoContext,
+    RetrievalAugmentedActionPredictor,
+)
+
+predictor = RetrievalAugmentedActionPredictor(policy)
+prediction = predictor.predict(
+    ActionChunkRequest(
+        query_state=torch.zeros(21),
+        demo=PreparedDemoContext(
+            candidate_id="episode-1:chunk-3",
+            state=torch.zeros(21),
+            transported_action=torch.zeros(6, 7),
+            retrieval_score=0.91,
+        ),
+    )
+)
+```
+
+这个接口刻意不接收 raw RGB、重复点云、多套物体位置或未校准的候选 mixture。它是已确认 top-1 Predictor 的稳定基线，
+不阻止后续在独立证据支持后增加多 Demo 模型。
