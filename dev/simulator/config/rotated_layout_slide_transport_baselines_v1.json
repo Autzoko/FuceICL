@@ -1,0 +1,11 @@
+{
+  "schema_version": "rotated-layout-slide-transport-baselines-v1",
+  "seed": 20261001,
+  "bootstrap_resamples": 10000,
+  "large_yaw_gap_degrees": 60.0,
+  "minimum_large_gap_contexts": 100,
+  "minimum_privileged_direction_accuracy": 0.95,
+  "minimum_point_direction_accuracy": 0.9,
+  "maximum_wrong_operation_direction_accuracy": 0.1,
+  "maximum_point_to_privileged_mse_ratio": 1.25
+}
