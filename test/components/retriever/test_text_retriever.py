@@ -8,7 +8,11 @@ import unittest
 import torch
 
 from lib.GLiNER2_Base import ParsedInstruction, TextSpan
-from src.components.retriever import TextCandidate, TextRetriever
+from src.components.retriever import (
+    TextCandidate,
+    TextRetriever,
+    TextRetrieverConfig,
+)
 
 
 class _FakeParser:
@@ -20,6 +24,11 @@ class _FakeParser:
         "object winner": ("bowl",),
         "plain query": (),
         "plain candidate": (),
+    }
+    _RELATIONS = {
+        "query": "approach",
+        "raw winner": "separate",
+        "object winner": "approach",
     }
 
     def parse_many(
@@ -36,7 +45,16 @@ class _FakeParser:
             TextSpan(value, 1.0, None, None)
             for value in self._OBJECTS.get(text, ())
         )
-        return ParsedInstruction(text, "place", 1.0, (), objects)
+        relation = self._RELATIONS.get(text)
+        return ParsedInstruction(
+            text,
+            "place",
+            1.0,
+            (),
+            objects,
+            relation,
+            1.0 if relation is not None else None,
+        )
 
 
 class _FakeEncoder:
@@ -96,6 +114,29 @@ class TextRetrieverTest(unittest.TestCase):
         self.assertAlmostEqual(hit.raw_text_score, 0.8, places=5)
         self.assertEqual(hit.object_score, 0.0)
         self.assertAlmostEqual(hit.score, 0.64, places=5)
+
+    def test_optional_relation_score_separates_opposite_tasks(self) -> None:
+        retriever = TextRetriever(
+            _FakeParser(),
+            _FakeEncoder(),
+            config=TextRetrieverConfig(
+                raw_text_weight=0.0,
+                object_weight=0.0,
+                relation_weight=1.0,
+            ),
+        )
+        retriever.build_index(
+            [
+                TextCandidate("opposite", "raw winner"),
+                TextCandidate("matching", "object winner"),
+            ]
+        )
+
+        result = retriever.retrieve("query", top_k=2)
+
+        self.assertEqual(result.hits[0].candidate.candidate_id, "matching")
+        self.assertEqual(result.hits[0].relation_score, 1.0)
+        self.assertEqual(result.hits[1].relation_score, -1.0)
 
     def test_duplicate_candidate_id_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "candidate_id 必须唯一"):

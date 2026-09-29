@@ -20,6 +20,7 @@ import torch
 from src.components.retriever.text_retriever import (
     TextCandidate,
     TextRetriever,
+    TextRetrieverConfig,
 )
 from dev.simulator.evaluate_rotated_layout_slide_demo_policy_confirmation import (
     _cross_transport,
@@ -166,14 +167,23 @@ def _score_record(result: Any) -> dict[str, Any]:
     return {
         "predicted_operation": hits[0].candidate.candidate_id,
         "margin": float(hits[0].score - hits[1].score),
+        "query_relation_effect": result.query.relation_effect,
+        "query_relation_effect_confidence": (
+            result.query.relation_effect_confidence
+        ),
         "ranking": [
             {
                 "operation": hit.candidate.candidate_id,
                 "score": hit.score,
                 "raw_text_score": hit.raw_text_score,
                 "object_score": hit.object_score,
+                "relation_score": hit.relation_score,
                 "goal_operation": hit.parsed.goal_operation,
                 "goal_operation_confidence": hit.parsed.goal_operation_confidence,
+                "relation_effect": hit.parsed.relation_effect,
+                "relation_effect_confidence": (
+                    hit.parsed.relation_effect_confidence
+                ),
             }
             for hit in hits
         ],
@@ -478,6 +488,8 @@ def run(
     output_path: Path,
     gliner_model_dir: Path,
     minilm_model_dir: Path,
+    text_config_path: Path | None,
+    text_config: TextRetrieverConfig | None,
     config: RetrievalStackConfig,
 ) -> None:
     if output_path.exists():
@@ -502,6 +514,7 @@ def run(
         gliner_model_dir=gliner_model_dir,
         minilm_model_dir=minilm_model_dir,
         device="cpu",
+        config=text_config,
     )
     text_model_load_seconds = time.perf_counter() - model_load_started
     index_started = time.perf_counter()
@@ -581,6 +594,10 @@ def run(
         "git_commit": _git_commit(project_root),
         "config": asdict(config),
         "config_sha256": _sha256(config_path),
+        "text_retriever_config": asdict(text_retriever.config),
+        "text_retriever_config_sha256": (
+            _sha256(text_config_path) if text_config_path is not None else None
+        ),
         "protocol": {
             "demo_bank_rows": len(bank_indices),
             "demo_bank_scene_pairs": int(
@@ -649,11 +666,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--gliner-model-dir", type=Path, required=True)
     parser.add_argument("--minilm-model-dir", type=Path, required=True)
+    parser.add_argument("--text-retriever-config", type=Path)
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     arguments = parse_args()
+    text_config_path = (
+        arguments.text_retriever_config.resolve()
+        if arguments.text_retriever_config is not None
+        else None
+    )
     run(
         project_root=arguments.project_root.resolve(),
         config_path=arguments.config.resolve(),
@@ -663,5 +686,13 @@ if __name__ == "__main__":
         output_path=arguments.output.resolve(),
         gliner_model_dir=arguments.gliner_model_dir.resolve(),
         minilm_model_dir=arguments.minilm_model_dir.resolve(),
+        text_config_path=text_config_path,
+        text_config=(
+            TextRetrieverConfig(
+                **json.loads(text_config_path.read_text(encoding="utf-8"))
+            )
+            if text_config_path is not None
+            else None
+        ),
         config=RetrievalStackConfig.from_json(arguments.config.resolve()),
     )

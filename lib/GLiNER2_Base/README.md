@@ -12,6 +12,7 @@ parsed = parser.parse("Put the red block into the bowl")
 输出 `ParsedInstruction` 包含：
 
 - `goal_operation`：规范化的最终操作类别；
+- `relation_effect`：可选的物体—参考物距离变化（`approach` / `separate`）；
 - `operations`：保留原文表达的全部动作片段；
 - `objects`：不区分角色的任务相关物体片段，并保留颜色、大小、位置等修饰语。
 

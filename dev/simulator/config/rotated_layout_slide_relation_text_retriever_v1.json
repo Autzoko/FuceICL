@@ -1,0 +1,9 @@
+{
+  "raw_text_weight": 0.35,
+  "object_weight": 0.05,
+  "relation_weight": 0.6,
+  "default_top_k": 10,
+  "parse_batch_size": 8,
+  "encode_batch_size": 64,
+  "score_batch_size": 1024
+}

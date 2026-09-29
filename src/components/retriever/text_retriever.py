@@ -32,21 +32,26 @@ class TextCandidate:
 
 @dataclass(frozen=True)
 class TextRetrieverConfig:
-    """文本初筛配置；默认权重来自冻结的 DROID 500-episode 实验。"""
+    """文本初筛配置；默认权重保持冻结的 DROID 500-episode 基线。"""
 
     raw_text_weight: float = 0.8
     object_weight: float = 0.2
+    relation_weight: float = 0.0
     default_top_k: int = 10
     parse_batch_size: int = 8
     encode_batch_size: int = 64
     score_batch_size: int = 1024
 
     def __post_init__(self) -> None:
-        weights = (self.raw_text_weight, self.object_weight)
+        weights = (
+            self.raw_text_weight,
+            self.object_weight,
+            self.relation_weight,
+        )
         if any(not math.isfinite(weight) or weight < 0 for weight in weights):
             raise ValueError("检索权重不能为负数")
-        if abs(self.raw_text_weight + self.object_weight - 1.0) > 1e-6:
-            raise ValueError("raw_text_weight 与 object_weight 之和必须为 1")
+        if abs(sum(weights) - 1.0) > 1e-6:
+            raise ValueError("文本检索权重之和必须为 1")
         sizes = (
             self.default_top_k,
             self.parse_batch_size,
@@ -68,6 +73,7 @@ class TextRetrievalHit:
     score: float
     raw_text_score: float
     object_score: float
+    relation_score: float
 
 
 @dataclass(frozen=True)
@@ -88,10 +94,10 @@ class _IndexedCandidate:
 
 
 class TextRetriever:
-    """使用原始文本语义和无角色物体集合完成任务文本初筛。
+    """使用原始文本、无角色物体集合和可选关系效果完成文本初筛。
 
-    当前冻结的排序不使用 operation 分数。GLiNER 仍会解析并保存 operation，便于
-    后续增加独立 operation bucket，而无需重新定义索引数据格式。
+    默认冻结排序不使用 relation 分数；新实验必须显式分配 ``relation_weight``，
+    以免改变既有 DROID/RLBench 基线。
     """
 
     def __init__(
@@ -248,6 +254,28 @@ class TextRetriever:
                 scores[start + offset] = value
         return scores
 
+    def _score_relations(self, query: ParsedInstruction) -> torch.Tensor:
+        """同关系给正证据、相反关系给负证据，未知关系保持中性。"""
+        scores = torch.zeros(len(self._records), dtype=torch.float32)
+        if query.relation_effect is None:
+            return scores
+        query_confidence = query.relation_effect_confidence or 0.0
+        for index, record in enumerate(self._records):
+            candidate = record.parsed
+            if candidate.relation_effect is None:
+                continue
+            confidence = min(
+                query_confidence,
+                candidate.relation_effect_confidence or 0.0,
+            )
+            direction = (
+                1.0
+                if query.relation_effect == candidate.relation_effect
+                else -1.0
+            )
+            scores[index] = direction * confidence
+        return scores
+
     def retrieve(
         self,
         query: str,
@@ -274,9 +302,11 @@ class TextRetriever:
         raw_scores = self._raw_embeddings @ query_embedding
         query_objects = self._encode_object_sets([parsed_query])[0]
         object_scores = self._score_object_sets(query_objects)
+        relation_scores = self._score_relations(parsed_query)
         scores = (
             self.config.raw_text_weight * raw_scores
             + self.config.object_weight * object_scores
+            + self.config.relation_weight * relation_scores
         )
 
         result_size = min(requested_top_k, len(self._records))
@@ -288,6 +318,7 @@ class TextRetriever:
                 score=float(scores[index]),
                 raw_text_score=float(raw_scores[index]),
                 object_score=float(object_scores[index]),
+                relation_score=float(relation_scores[index]),
             )
             for index in ranking.tolist()
         )

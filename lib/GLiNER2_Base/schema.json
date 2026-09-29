@@ -1,5 +1,5 @@
 {
-  "schema_version": "text-retrieval-v1-2026-09-25",
+  "schema_version": "text-retrieval-v2-2026-09-29",
   "thresholds": {
     "classification": 0.15,
     "operation_span": 0.15,
@@ -23,6 +23,11 @@
     "press": "the final goal presses or activates a button, key, or switch instead of moving an ordinary object",
     "pull": "the final goal pulls an object without opening an articulated mechanism",
     "other": "the final goal is not covered by any other category"
+  },
+  "relation_effects": {
+    "approach": "the manipulated object moves toward a reference object so the distance or separation decreases",
+    "separate": "the manipulated object moves away from a reference object so the distance or separation increases",
+    "other": "the instruction does not specify whether distance to a reference object increases or decreases"
   },
   "entities": {
     "operation": {

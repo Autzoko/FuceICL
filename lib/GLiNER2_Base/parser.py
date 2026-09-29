@@ -42,6 +42,8 @@ class ParsedInstruction:
     goal_operation_confidence: float | None
     operations: tuple[TextSpan, ...]
     objects: tuple[TextSpan, ...]
+    relation_effect: str | None = None
+    relation_effect_confidence: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转换为可 JSON 序列化的字典。"""
@@ -90,6 +92,11 @@ class GLiNERTextParser:
             .classification(
                 "goal_operation",
                 self.config["goal_operations"],
+                cls_threshold=float(thresholds["classification"]),
+            )
+            .classification(
+                "relation_effect",
+                self.config["relation_effects"],
                 cls_threshold=float(thresholds["classification"]),
             )
             .entities(
@@ -203,6 +210,15 @@ class GLiNERTextParser:
                 operation_result,
                 "goal_operation",
             )
+            relation, relation_confidence = self._classification(
+                operation_result,
+                "relation_effect",
+            )
+            # ``other`` 表示文本没有可用于检索的有向关系，不能把两个
+            # “未知”标签错误地当成正匹配证据。
+            if relation == "other":
+                relation = None
+                relation_confidence = None
             parsed.append(
                 ParsedInstruction(
                     text=text,
@@ -210,6 +226,8 @@ class GLiNERTextParser:
                     goal_operation_confidence=goal_confidence,
                     operations=self._spans(operation_result, operation_label),
                     objects=self._spans(object_result, object_label),
+                    relation_effect=relation,
+                    relation_effect_confidence=relation_confidence,
                 )
             )
         return parsed
