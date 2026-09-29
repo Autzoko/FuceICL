@@ -1,0 +1,21 @@
+{
+  "schema_version": "relation-effect-last-block-v1",
+  "seed": 20261011,
+  "attention_dim": 64,
+  "epochs": 60,
+  "batch_size": 32,
+  "head_learning_rate": 0.001,
+  "encoder_learning_rate": 0.00002,
+  "weight_decay": 0.0001,
+  "gradient_clip_norm": 1.0,
+  "early_stopping_patience": 10,
+  "parse_batch_size": 16,
+  "max_length": 64,
+  "conformal_alpha": 0.05,
+  "minimum_validation_accuracy": 0.95,
+  "minimum_calibration_coverage": 0.95,
+  "minimum_calibration_singleton_rate": 0.8,
+  "maximum_trainable_parameters": 1850000,
+  "latency_warmup": 50,
+  "latency_iterations": 200
+}
