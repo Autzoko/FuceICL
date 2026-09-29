@@ -40,6 +40,9 @@ from dev.simulator.evaluate_rotated_layout_slide_transport import (
     _sha256,
     _strip_rows,
 )
+from dev.simulator.dropout_risk_support import (
+    evaluate_dropout_risk_support,
+)
 from dev.simulator.preprocess_bidirectional_slide_predictor import _trajectory
 from dev.simulator.train_belief_local_demo_residual import (
     _git_commit,
@@ -84,6 +87,14 @@ class PreterminalExecutionConfig:
     minimum_belief_risk_pair_coverage: float = 1.0
     minimum_missing_belief_queries: int = 0
     minimum_belief_risk_rejected_queries: int = 0
+    expected_dropout_risk_probe_enabled: bool = False
+    minimum_dropout_risk_accepted_queries: int = 0
+    minimum_dropout_risk_rejected_queries: int = 0
+    minimum_dropout_risk_both_queries: int = 0
+    minimum_dropout_risk_accepted_displacement_m: float = 0.0
+    maximum_dropout_risk_accepted_displacement_m: float = 1.0
+    minimum_dropout_risk_rejected_displacement_m: float = 0.0
+    maximum_dropout_risk_accepted_belief_error_m: float = 1.0
 
     @classmethod
     def from_json(cls, path: Path) -> "PreterminalExecutionConfig":
@@ -113,6 +124,9 @@ class PreterminalExecutionConfig:
         optional_counts = (
             self.minimum_missing_belief_queries,
             self.minimum_belief_risk_rejected_queries,
+            self.minimum_dropout_risk_accepted_queries,
+            self.minimum_dropout_risk_rejected_queries,
+            self.minimum_dropout_risk_both_queries,
         )
         if min(optional_counts) < 0:
             raise ValueError("belief risk 最少样本数不得为负")
@@ -147,6 +161,36 @@ class PreterminalExecutionConfig:
             <= 0.0
         ):
             raise ValueError("belief risk gate 位移门槛必须为正")
+        if not isinstance(self.expected_dropout_risk_probe_enabled, bool):
+            raise TypeError("expected_dropout_risk_probe_enabled 必须是 bool")
+        dropout_thresholds = (
+            self.minimum_dropout_risk_accepted_displacement_m,
+            self.maximum_dropout_risk_accepted_displacement_m,
+            self.minimum_dropout_risk_rejected_displacement_m,
+            self.maximum_dropout_risk_accepted_belief_error_m,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0.0
+            for value in dropout_thresholds
+        ):
+            raise ValueError("dropout risk threshold 必须是非负有限数")
+        if self.expected_dropout_risk_probe_enabled:
+            if (
+                self.maximum_dropout_risk_accepted_displacement_m
+                < self.minimum_dropout_risk_accepted_displacement_m
+                or self.minimum_dropout_risk_rejected_displacement_m
+                < self.maximum_dropout_risk_accepted_displacement_m
+            ):
+                raise ValueError("dropout risk boundary 配置顺序非法")
+            if min(
+                self.minimum_dropout_risk_accepted_queries,
+                self.minimum_dropout_risk_rejected_queries,
+                self.minimum_dropout_risk_both_queries,
+            ) <= 0:
+                raise ValueError("启用 dropout risk 时 support 数量必须为正")
 
     @property
     def expected_data_sha256(self) -> str:
@@ -313,7 +357,26 @@ def run(
         and rejected_belief_queries
         >= config.minimum_belief_risk_rejected_queries
     )
-    if not risk_support_passed:
+    dropout_risk_support = evaluate_dropout_risk_support(
+        query_report.get("dropout_risk_probe", {}),
+        required=config.expected_dropout_risk_probe_enabled,
+        minimum_accepted=config.minimum_dropout_risk_accepted_queries,
+        minimum_rejected=config.minimum_dropout_risk_rejected_queries,
+        minimum_both=config.minimum_dropout_risk_both_queries,
+        minimum_accepted_displacement_m=(
+            config.minimum_dropout_risk_accepted_displacement_m
+        ),
+        maximum_accepted_displacement_m=(
+            config.maximum_dropout_risk_accepted_displacement_m
+        ),
+        minimum_rejected_displacement_m=(
+            config.minimum_dropout_risk_rejected_displacement_m
+        ),
+        maximum_accepted_belief_error_m=(
+            config.maximum_dropout_risk_accepted_belief_error_m
+        ),
+    )
+    if not risk_support_passed or not dropout_risk_support["passed"]:
         raise RuntimeError(
             "belief risk support 未通过，拒绝运行 learned policies"
         )
@@ -535,6 +598,7 @@ def run(
             >= config.minimum_missing_belief_queries
             and rejected_belief_queries
             >= config.minimum_belief_risk_rejected_queries
+            and dropout_risk_support["passed"]
             and coverage["fraction"] >= config.minimum_valid_query_fraction
             and coverage["minimum_progress_fraction"]
             >= config.minimum_progress_valid_fraction
@@ -606,6 +670,7 @@ def run(
         "two_forward_latency_ms": latency,
         "no_demo_action_maximum_absolute": no_demo_action_maximum,
         "belief_risk_support": risk_coverage,
+        "dropout_risk_support": dropout_risk_support,
         "missing_belief_queries": missing_belief_queries,
         "rejected_belief_queries": rejected_belief_queries,
         "evaluation_support": coverage,
