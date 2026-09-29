@@ -13,7 +13,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from dev.predictor.demo_relative_policy import (
+from src.components.predictor.demo_relative_policy import (
     DemoRelativePolicy,
     DemoRelativePolicyConfig,
 )

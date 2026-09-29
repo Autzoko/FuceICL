@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from dev.predictor.demo_relative_policy import (
+from src.components.predictor.demo_relative_policy import (
     DemoRelativePolicy,
     DemoRelativePolicyConfig,
 )

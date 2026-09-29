@@ -113,7 +113,7 @@ class DemoRelativePolicy(nn.Module):
         raw_demo_action: torch.Tensor,
         demo_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """返回 `[B,H,7]` action；query 仅通过与 Demo 的差值进入网络。"""
+        """返回 `[B,H,7]` action；query 仅以与 Demo 的差值进入网络。"""
         tensors = {
             "query_state": query_state,
             "demo_state": demo_state,
@@ -139,7 +139,7 @@ class DemoRelativePolicy(nn.Module):
         if bool(((demo_mask < 0.0) | (demo_mask > 1.0)).any()):
             raise ValueError("demo_mask 必须位于 [0,1]")
 
-        # mean 在差分中抵消；保留统一 normalizer 便于 checkpoint 契约。
+        # mean 在差分中抵消；buffer 仍保留 checkpoint normalizer 契约。
         delta = (query_state - demo_state) / self.state_std
         features = torch.cat(
             (delta, self._action_features(raw_demo_action).flatten(1)),
