@@ -10,6 +10,8 @@ import torch
 from transforms3d.euler import euler2quat
 
 from mani_skill.envs.tasks.tabletop.push_cube import PushCubeEnv
+from mani_skill.sensors.camera import CameraConfig
+from mani_skill.utils import sapien_utils
 from mani_skill.utils.building import actors
 from mani_skill.utils.registration import register_env
 from mani_skill.utils.structs import Pose
@@ -22,11 +24,43 @@ class RotatedLayoutSlideEnv(PushCubeEnv):
     anchor_offset_m = 0.08
     maximum_axis_yaw_rad = math.pi / 3.0
 
-    def __init__(self, *args, operation: str, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        operation: str,
+        camera_variant: str = "single",
+        **kwargs,
+    ) -> None:
         if operation not in {"toward", "away"}:
             raise ValueError("operation 必须为 toward 或 away")
+        if camera_variant not in {"single", "dual-fixed-v1"}:
+            raise ValueError("未知 camera variant")
         self.operation = operation
+        self.camera_variant = camera_variant
         super().__init__(*args, **kwargs)
+
+    @property
+    def _default_sensor_configs(self) -> list[CameraConfig]:
+        """默认保持单相机；实验变体显式增加固定侧视 RGB-D。"""
+        configs = list(super()._default_sensor_configs)
+        if self.camera_variant == "single":
+            return configs
+        side_pose = sapien_utils.look_at(
+            eye=[0.0, -0.45, 0.55],
+            target=[0.0, 0.0, 0.05],
+        )
+        configs.append(
+            CameraConfig(
+                "side_camera",
+                pose=side_pose,
+                width=128,
+                height=128,
+                fov=np.pi / 2,
+                near=0.01,
+                far=100,
+            )
+        )
+        return configs
 
     @property
     def operation_direction(self) -> float:

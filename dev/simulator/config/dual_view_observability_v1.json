@@ -1,0 +1,10 @@
+{
+  "schema_version": "dual-view-observability-v1",
+  "expected_camera_variant": "dual-fixed-v1",
+  "expected_query_frames": 9993,
+  "expected_baseline_report_sha256": "d64a1f55333c0aa0e3a00ab15a43d48cea9e3be8f49e685a27fe30eefccbfe98",
+  "maximum_below_threshold_fraction": 0.01,
+  "maximum_missing_run_frames": 2,
+  "minimum_fixed_progress_visible_fraction": 1.0,
+  "maximum_centroid_error_m": 0.025
+}
