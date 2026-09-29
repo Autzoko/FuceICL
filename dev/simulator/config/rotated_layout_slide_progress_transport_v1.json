@@ -1,0 +1,16 @@
+{
+  "schema_version": "rotated-layout-slide-progress-transport-v1",
+  "seed": 20261013,
+  "bootstrap_resamples": 10000,
+  "state_std_floor": 0.0001,
+  "maximum_progress_mae": 0.15,
+  "minimum_progress_within_tolerance_fraction": 0.9,
+  "progress_tolerance": 0.2,
+  "minimum_direction_accuracy": 0.9,
+  "minimum_relative_mse_improvement": 0.2,
+  "large_yaw_gap_degrees": 60.0,
+  "minimum_large_yaw_rows": 30,
+  "minimum_large_yaw_direction_accuracy": 0.85,
+  "minimum_large_yaw_relative_mse_improvement": 0.2,
+  "minimum_shuffled_relative_mse_improvement": 0.2
+}
