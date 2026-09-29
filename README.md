@@ -49,3 +49,38 @@ assert route.accepted
 
 本地 checkpoint 分别存放于 `lib/GLiNER2_Base/checkpoint` 和
 `lib/all_MiniLM_L6_v2/checkpoint`，加载过程不会隐式访问网络。
+
+## 几何 embedding 精排接口
+
+冻结的 PointNet/几何 encoder 只负责生成 query/candidate embedding；分桶后的精确排序由
+`ExactEmbeddingRetriever` 完成。它不加载文本或点云模型，默认返回 top-4，并限制同一 episode 最多一个 chunk：
+
+```python
+import torch
+
+from src.components.retriever import (
+    EmbeddingCandidate,
+    EmbeddingQuery,
+    ExactEmbeddingRetriever,
+)
+
+local_retriever = ExactEmbeddingRetriever()
+local_retriever.build_index(
+    [
+        EmbeddingCandidate(
+            candidate_id="episode-1:chunk-3",
+            task_key=key,
+            embedding=torch.tensor([0.4, 0.8]),
+            episode_id="episode-1",
+            payload={"action_ref": "arrays.zarr/episode-1/chunk-3"},
+        )
+    ]
+)
+local_result = local_retriever.retrieve(
+    EmbeddingQuery(key, torch.tensor([0.5, 0.7]))
+)
+assert local_result.accepted
+```
+
+`minimum_score` 默认为空，因为拒绝阈值必须由独立 calibration 数据确定，不能在组件中硬编码。未知 task key、低于已配置
+阈值以及未建立索引均有独立的可审计行为。
