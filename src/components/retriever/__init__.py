@@ -12,6 +12,11 @@ from .task_router import (
 )
 
 if TYPE_CHECKING:
+    from .belief_tracker import (
+        ObjectBeliefEstimate,
+        VisibilityConditionedBeliefTracker,
+        belief_risk_accepted,
+    )
     from .embedding_retriever import (
         EmbeddingCandidate,
         EmbeddingQuery,
@@ -50,6 +55,14 @@ _EMBEDDING_EXPORTS = frozenset(
     }
 )
 
+_BELIEF_EXPORTS = frozenset(
+    {
+        "ObjectBeliefEstimate",
+        "VisibilityConditionedBeliefTracker",
+        "belief_risk_accepted",
+    }
+)
+
 
 def __getattr__(name: str) -> Any:
     """按需加载文本模型或 embedding 检索依赖。"""
@@ -57,6 +70,8 @@ def __getattr__(name: str) -> Any:
         from . import text_retriever as module
     elif name in _EMBEDDING_EXPORTS:
         from . import embedding_retriever as module
+    elif name in _BELIEF_EXPORTS:
+        from . import belief_tracker as module
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     value = getattr(module, name)
@@ -70,6 +85,7 @@ __all__ = [
     "EmbeddingRetrievalResult",
     "EmbeddingRetrieverConfig",
     "ExactEmbeddingRetriever",
+    "ObjectBeliefEstimate",
     "TextCandidate",
     "TextRetrievalHit",
     "TextRetrievalResult",
@@ -79,4 +95,6 @@ __all__ = [
     "TaskBucketRouter",
     "TaskKey",
     "TaskRouteResult",
+    "VisibilityConditionedBeliefTracker",
+    "belief_risk_accepted",
 ]

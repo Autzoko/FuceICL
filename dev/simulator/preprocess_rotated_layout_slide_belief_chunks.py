@@ -42,6 +42,11 @@ from dev.simulator.preprocess_rotated_layout_slide_predictor import (
 from dev.simulator.preprocess_rotated_layout_slide_progress_chunks import (
     _paths,
 )
+from src.components.retriever.belief_tracker import (
+    ObjectBeliefEstimate as ActiveBelief,
+    VisibilityConditionedBeliefTracker,
+    belief_risk_accepted as _belief_risk_accepted,
+)
 
 
 STATE_FEATURES = ANCHOR_STATE_FEATURES + (
@@ -111,19 +116,6 @@ class BeliefChunkConfig:
             raise ValueError("belief risk gate 位移门槛必须为正")
 
 
-@dataclass(frozen=True)
-class ActiveBelief:
-    """一个固定帧的因果 active-object belief。"""
-
-    points_world: np.ndarray
-    center_world: np.ndarray
-    visible: bool
-    age_steps: int
-    observed_point_count: int
-    tcp_net_displacement_since_visible_m: float
-    tcp_path_length_since_visible_m: float
-
-
 def _belief_frames(
     branch: int,
     action_steps: int,
@@ -142,20 +134,6 @@ def _belief_frames(
     if len(np.unique(frames)) != config.progress_samples:
         raise ValueError("trajectory 太短，belief progress frames 出现重复")
     return frames.tolist()
-
-
-def _belief_risk_accepted(
-    *,
-    visible: bool,
-    tcp_net_displacement_m: float,
-    maximum_tcp_net_displacement_m: float | None,
-) -> bool:
-    """只用因果可得量执行解析 belief risk gate。"""
-    return bool(
-        visible
-        or maximum_tcp_net_displacement_m is None
-        or tcp_net_displacement_m <= maximum_tcp_net_displacement_m
-    )
 
 
 def _git_commit(root: Path) -> str:
@@ -182,47 +160,17 @@ def _active_beliefs(
     """逐帧测量更新；不可见时只累计已发生的 TCP 位移。"""
     requested = set(frames)
     beliefs: dict[int, ActiveBelief] = {}
-    points: np.ndarray | None = None
-    center: np.ndarray | None = None
-    age = 0
-    last_visible_tcp: np.ndarray | None = None
-    tcp_path_length = 0.0
+    tracker = VisibilityConditionedBeliefTracker(
+        minimum_visible_points=minimum_points
+    )
     for frame in range(branch, max(frames) + 1):
         observed = _segmented_points(xyzw[frame], segmentation[frame], label)
-        visible = len(observed) >= minimum_points
-        if visible:
-            points = np.asarray(observed, dtype=np.float64)
-            center = points.mean(axis=0)
-            age = 0
-            last_visible_tcp = tcp_positions[frame].copy()
-            tcp_path_length = 0.0
-        else:
-            if (
-                points is None
-                or center is None
-                or last_visible_tcp is None
-                or frame == branch
-            ):
-                raise ValueError("active belief 缺少可传播的因果测量")
-            delta = tcp_positions[frame] - tcp_positions[frame - 1]
-            points = points + delta
-            center = center + delta
-            age += 1
-            tcp_path_length += float(np.linalg.norm(delta))
+        try:
+            belief = tracker.update(observed, tcp_positions[frame])
+        except RuntimeError as error:
+            raise ValueError("active belief 缺少可传播的因果测量") from error
         if frame in requested:
-            if last_visible_tcp is None:
-                raise RuntimeError("active belief 缺少 last-visible TCP")
-            beliefs[frame] = ActiveBelief(
-                points_world=points.copy(),
-                center_world=center.copy(),
-                visible=visible,
-                age_steps=age,
-                observed_point_count=len(observed),
-                tcp_net_displacement_since_visible_m=float(
-                    np.linalg.norm(tcp_positions[frame] - last_visible_tcp)
-                ),
-                tcp_path_length_since_visible_m=tcp_path_length,
-            )
+            beliefs[frame] = belief
     if set(beliefs) != requested:
         raise ValueError("belief 固定帧不完整")
     return beliefs
