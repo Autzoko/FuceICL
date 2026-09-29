@@ -40,7 +40,6 @@ from dev.simulator.preprocess_rotated_layout_slide_predictor import (
     _sha256,
 )
 from dev.simulator.preprocess_rotated_layout_slide_progress_chunks import (
-    _frames,
     _paths,
 )
 
@@ -70,6 +69,7 @@ class BeliefChunkConfig:
     position_limit_m: float
     rotation_scale_rad: float
     maximum_layout_axis_error_degrees: float
+    progress_fraction_maximum: float = 1.0
 
     @classmethod
     def from_json(cls, path: Path) -> "BeliefChunkConfig":
@@ -101,6 +101,8 @@ class BeliefChunkConfig:
             raise ValueError("progress_samples 至少为 2")
         if self.maximum_belief_error_m < self.maximum_centroid_error_m:
             raise ValueError("belief error 门槛不得小于 measurement 门槛")
+        if not 0.0 < self.progress_fraction_maximum <= 1.0:
+            raise ValueError("progress_fraction_maximum 必须位于 (0,1]")
 
 
 @dataclass(frozen=True)
@@ -112,6 +114,26 @@ class ActiveBelief:
     visible: bool
     age_steps: int
     observed_point_count: int
+
+
+def _belief_frames(
+    branch: int,
+    action_steps: int,
+    config: BeliefChunkConfig,
+) -> list[int]:
+    """在完整 H6 可取区间的冻结前缀内均匀采样。"""
+    last = action_steps - config.action_horizon
+    if last < branch:
+        raise ValueError("branch 后没有完整 action chunk")
+    safe_last = branch + int(
+        np.floor(config.progress_fraction_maximum * (last - branch))
+    )
+    frames = np.rint(
+        np.linspace(branch, safe_last, config.progress_samples)
+    ).astype(np.int64)
+    if len(np.unique(frames)) != config.progress_samples:
+        raise ValueError("trajectory 太短，belief progress frames 出现重复")
+    return frames.tolist()
 
 
 def _git_commit(root: Path) -> str:
@@ -352,7 +374,7 @@ def run(
                         config.seed, pair_id, operation, 0, "initial_anchor"
                     ),
                 )
-                frames = _frames(branch, len(actions), config)
+                frames = _belief_frames(branch, len(actions), config)
                 beliefs = _active_beliefs(
                     xyzw=xyzw,
                     segmentation=segmentation,
@@ -528,6 +550,13 @@ def run(
             "progress_feature_used_as_input": False,
             "test_split_used": False,
             "rows_per_trajectory": config.progress_samples,
+            "progress_fraction_maximum": (
+                config.progress_fraction_maximum
+            ),
+            "progress_schedule": (
+                "uniform in [branch, floor(branch + maximum * "
+                "(last_h6_start - branch))]"
+            ),
         },
         "rows": expected_rows,
         "pairs": config.expected_pairs,

@@ -1,0 +1,16 @@
+{
+  "schema_version": "rotated-layout-slide-paired-collection-v1",
+  "start_seed": 18000000,
+  "target_pairs": 16,
+  "maximum_attempts": 32,
+  "validation_pairs": 2,
+  "test_pairs": 2,
+  "split_seed": 20261021,
+  "yaw_seed": 180771,
+  "maximum_absolute_yaw_degrees": 60.0,
+  "neutral_height_m": 0.12,
+  "contact_offset_m": 0.05,
+  "goal_standoff_m": 0.08,
+  "paired_state_tolerance": 0.000001,
+  "minimum_branch_target_separation_m": 0.09
+}
