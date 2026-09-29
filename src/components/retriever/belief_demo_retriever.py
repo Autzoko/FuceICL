@@ -176,10 +176,11 @@ class ExactBeliefDemoRetriever:
             raise ValueError("query state dimension 与 state_std 不一致")
         delta = bucket.normalized_states - state / self.state_std
         distances = torch.mean(delta * delta, dim=1)
-        order = sorted(
-            range(len(bucket.candidates)),
-            key=lambda index: (float(distances[index]), index),
-        )[:top_k]
+        if top_k == 1:
+            order = [int(torch.argmin(distances))]
+        else:
+            # stable=True 在距离相同时保持离线索引顺序，避免 Python 标量循环。
+            order = torch.argsort(distances, stable=True)[:top_k].tolist()
         hits = tuple(
             BeliefDemoHit(
                 candidate=bucket.candidates[index],

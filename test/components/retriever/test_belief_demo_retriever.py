@@ -92,6 +92,26 @@ class ExactBeliefDemoRetrieverTest(unittest.TestCase):
         torch.testing.assert_close(candidate.state, torch.tensor([1.0, 2.0]))
         torch.testing.assert_close(candidate.raw_action, torch.ones(6, 7))
 
+    def test_equal_distances_keep_index_order(self) -> None:
+        action = torch.zeros(6, 7)
+        retriever = ExactBeliefDemoRetriever(torch.ones(2))
+        retriever.build_index(
+            [
+                BeliefDemoCandidate("first", "slide", torch.ones(2), action),
+                BeliefDemoCandidate("second", "slide", torch.ones(2), action),
+            ]
+        )
+
+        result = retriever.retrieve(
+            BeliefDemoQuery("slide", torch.zeros(2)),
+            top_k=2,
+        )
+
+        self.assertEqual(
+            [hit.candidate.candidate_id for hit in result.hits],
+            ["first", "second"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
