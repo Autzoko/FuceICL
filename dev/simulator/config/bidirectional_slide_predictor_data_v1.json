@@ -1,0 +1,13 @@
+{
+  "schema_version": "bidirectional-slide-predictor-data-v1",
+  "seed": 20261009,
+  "expected_pairs": 48,
+  "action_horizon": 6,
+  "points_per_object": 128,
+  "label_probe_frames": 5,
+  "minimum_label_points": 8,
+  "maximum_centroid_error_m": 0.08,
+  "position_limit_m": 0.1,
+  "rotation_scale_rad": -0.1,
+  "paired_observation_tolerance": 1e-6
+}
