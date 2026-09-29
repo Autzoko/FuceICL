@@ -1,0 +1,88 @@
+{
+  "schema_version": "rotated-layout-slide-retrieval-stack-v1",
+  "seed": 20261007,
+  "bootstrap_resamples": 10000,
+  "selective_margin_threshold": 0.01,
+  "minimum_canonical_task_accuracy": 1.0,
+  "minimum_paraphrase_task_accuracy": 0.75,
+  "minimum_end_to_end_direction_accuracy": 0.9,
+  "maximum_policy_to_oracle_mse_ratio": 1.25,
+  "task_prototypes": {
+    "toward": "Push the red cube toward the green marker.",
+    "away": "Push the red cube away from the green marker."
+  },
+  "language_pairs": [
+    {
+      "name": "canonical_push",
+      "category": "canonical",
+      "toward": "Push the red cube toward the green marker.",
+      "away": "Push the red cube away from the green marker."
+    },
+    {
+      "name": "canonical_move",
+      "category": "canonical",
+      "toward": "Move the red cube toward the green marker.",
+      "away": "Move the red cube away from the green marker."
+    },
+    {
+      "name": "canonical_slide",
+      "category": "canonical",
+      "toward": "Slide the red cube toward the green marker.",
+      "away": "Slide the red cube away from the green marker."
+    },
+    {
+      "name": "lexical_closer",
+      "category": "paraphrase",
+      "toward": "Move the red cube closer to the green marker.",
+      "away": "Move the red cube farther from the green marker."
+    },
+    {
+      "name": "lexical_nearer",
+      "category": "paraphrase",
+      "toward": "Shift the red cube nearer to the green marker.",
+      "away": "Shift the red cube farther away from the green marker."
+    },
+    {
+      "name": "lexical_direction",
+      "category": "paraphrase",
+      "toward": "Slide the red cube in the direction of the green marker.",
+      "away": "Slide the red cube in the opposite direction from the green marker."
+    },
+    {
+      "name": "lexical_approach",
+      "category": "paraphrase",
+      "toward": "Make the red cube approach the green marker.",
+      "away": "Make the red cube retreat from the green marker."
+    },
+    {
+      "name": "relational_distance",
+      "category": "compositional",
+      "toward": "Decrease the distance between the red cube and the green marker.",
+      "away": "Increase the distance between the red cube and the green marker."
+    },
+    {
+      "name": "relational_separation",
+      "category": "compositional",
+      "toward": "Reduce the separation between the red cube and the green marker.",
+      "away": "Enlarge the separation between the red cube and the green marker."
+    },
+    {
+      "name": "relational_final_state",
+      "category": "compositional",
+      "toward": "The red cube should end up closer to the green marker.",
+      "away": "The red cube should end up farther from the green marker."
+    },
+    {
+      "name": "relational_motion",
+      "category": "compositional",
+      "toward": "Push the red cube so that it approaches the green marker.",
+      "away": "Push the red cube so that it recedes from the green marker."
+    },
+    {
+      "name": "relational_gap",
+      "category": "compositional",
+      "toward": "Reposition the red cube to shorten the gap to the green marker.",
+      "away": "Reposition the red cube to lengthen the gap to the green marker."
+    }
+  ]
+}

@@ -18,6 +18,9 @@ import numpy as np
 
 from dev.predictor.action_chunk_data import matrix_to_axis_angle
 from dev.predictor.canonical_geometry import FEATURE_NAMES, GEOMETRY_DIM
+from dev.simulator.geometry import (
+    quaternion_wxyz_to_matrix as _quaternion_wxyz_to_matrix,
+)
 
 
 @dataclass(frozen=True)
@@ -100,35 +103,6 @@ def _write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
     with path.open("w", encoding="utf-8") as stream:
         for row in rows:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-
-def _quaternion_wxyz_to_matrix(quaternion: np.ndarray) -> np.ndarray:
-    """将 ManiSkill/SAPIEN ``wxyz`` quaternion 转为旋转矩阵。"""
-    w, x, y, z = np.asarray(quaternion, dtype=np.float64)
-    norm = float(np.linalg.norm((w, x, y, z)))
-    if norm <= 1e-12:
-        raise ValueError("TCP quaternion 退化")
-    w, x, y, z = np.asarray((w, x, y, z), dtype=np.float64) / norm
-    return np.asarray(
-        [
-            [
-                1.0 - 2.0 * (y * y + z * z),
-                2.0 * (x * y - z * w),
-                2.0 * (x * z + y * w),
-            ],
-            [
-                2.0 * (x * y + z * w),
-                1.0 - 2.0 * (x * x + z * z),
-                2.0 * (y * z - x * w),
-            ],
-            [
-                2.0 * (x * z - y * w),
-                2.0 * (y * z + x * w),
-                1.0 - 2.0 * (x * x + y * y),
-            ],
-        ],
-        dtype=np.float64,
-    )
 
 
 def _shape_sigmas(points: np.ndarray) -> np.ndarray:

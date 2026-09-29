@@ -15,8 +15,8 @@ from typing import Any
 
 import numpy as np
 
-from dev.simulator.preprocess_maniskill_chunks import (
-    _quaternion_wxyz_to_matrix,
+from dev.simulator.geometry import (
+    quaternion_wxyz_to_matrix as _quaternion_wxyz_to_matrix,
 )
 
 
