@@ -332,7 +332,7 @@ def _same_phase_action_shuffle(
     mapping = torch.arange(len(prepared.target))
     phases = _phase(prepared.query_geometry)
     for phase in (False, True):
-        indices = torch.flatnonzero(phases == phase)
+        indices = torch.nonzero(phases == phase, as_tuple=False).flatten()
         if len(indices) < 2:
             raise ValueError("同 phase shuffled intervention 候选不足")
         shift = max(1, len(indices) // 2)
