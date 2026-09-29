@@ -70,6 +70,7 @@ class BeliefChunkConfig:
     rotation_scale_rad: float
     maximum_layout_axis_error_degrees: float
     progress_fraction_maximum: float = 1.0
+    belief_risk_gate_maximum_tcp_net_displacement_m: float | None = None
 
     @classmethod
     def from_json(cls, path: Path) -> "BeliefChunkConfig":
@@ -103,6 +104,11 @@ class BeliefChunkConfig:
             raise ValueError("belief error 门槛不得小于 measurement 门槛")
         if not 0.0 < self.progress_fraction_maximum <= 1.0:
             raise ValueError("progress_fraction_maximum 必须位于 (0,1]")
+        if (
+            self.belief_risk_gate_maximum_tcp_net_displacement_m is not None
+            and self.belief_risk_gate_maximum_tcp_net_displacement_m <= 0.0
+        ):
+            raise ValueError("belief risk gate 位移门槛必须为正")
 
 
 @dataclass(frozen=True)
@@ -136,6 +142,20 @@ def _belief_frames(
     if len(np.unique(frames)) != config.progress_samples:
         raise ValueError("trajectory 太短，belief progress frames 出现重复")
     return frames.tolist()
+
+
+def _belief_risk_accepted(
+    *,
+    visible: bool,
+    tcp_net_displacement_m: float,
+    maximum_tcp_net_displacement_m: float | None,
+) -> bool:
+    """只用因果可得量执行解析 belief risk gate。"""
+    return bool(
+        visible
+        or maximum_tcp_net_displacement_m is None
+        or tcp_net_displacement_m <= maximum_tcp_net_displacement_m
+    )
 
 
 def _git_commit(root: Path) -> str:
@@ -288,6 +308,8 @@ def run(
         "frame",
         "active_visible",
         "belief_age_steps",
+        "belief_risk_accepted",
+        "belief_risk_score_m",
         "active_points",
         "anchor_points",
         "state",
@@ -300,6 +322,8 @@ def run(
     belief_errors = {True: [], False: []}
     memory_point_counts = []
     label_probe_errors = []
+    risk_accepted_count = 0
+    risk_rejected_rows: list[dict[str, Any]] = []
     try:
         for pair in pair_rows:
             pair_id = int(pair["pair_id"])
@@ -416,10 +440,36 @@ def run(
                         if belief.visible
                         else config.maximum_belief_error_m
                     )
-                    if belief_error > limit:
+                    risk_threshold = (
+                        config.belief_risk_gate_maximum_tcp_net_displacement_m
+                    )
+                    risk_accepted = _belief_risk_accepted(
+                        visible=belief.visible,
+                        tcp_net_displacement_m=(
+                            belief.tcp_net_displacement_since_visible_m
+                        ),
+                        maximum_tcp_net_displacement_m=risk_threshold,
+                    )
+                    risk_accepted_count += int(risk_accepted)
+                    if belief_error > limit and risk_accepted:
                         raise ValueError(
                             f"seed={seed} frame={frame} belief error="
                             f"{belief_error:.4f} m 超限"
+                        )
+                    if not risk_accepted:
+                        risk_rejected_rows.append(
+                            {
+                                "pair_id": pair_id,
+                                "seed": seed,
+                                "operation": operation,
+                                "progress_index": progress_index,
+                                "frame": frame,
+                                "belief_error_m": belief_error,
+                                "belief_age_steps": belief.age_steps,
+                                "tcp_net_displacement_since_visible_m": (
+                                    belief.tcp_net_displacement_since_visible_m
+                                ),
+                            }
                         )
                     rotation = _quaternion_wxyz_to_matrix(
                         tcp_poses[frame, 3:7]
@@ -464,6 +514,10 @@ def run(
                         "frame": frame,
                         "active_visible": int(belief.visible),
                         "belief_age_steps": belief.age_steps,
+                        "belief_risk_accepted": int(risk_accepted),
+                        "belief_risk_score_m": (
+                            belief.tcp_net_displacement_since_visible_m
+                        ),
                     }
                     for name, value in scalars.items():
                         arrays[name].append(value)
@@ -496,6 +550,10 @@ def run(
                                 belief.observed_point_count
                             ),
                             "belief_error_m": belief_error,
+                            "belief_risk_accepted": risk_accepted,
+                            "belief_risk_score_m": (
+                                belief.tcp_net_displacement_since_visible_m
+                            ),
                             "initial_layout_axis_error_degrees": axis_error,
                         }
                     )
@@ -522,12 +580,13 @@ def run(
         "frame",
         "active_visible",
         "belief_age_steps",
+        "belief_risk_accepted",
     }
     stacked = {
         name: np.asarray(values, dtype=np.int64)
         if name in integer_names
         else np.asarray(values, dtype=np.float32)
-        if name == "progress_fraction"
+        if name in {"progress_fraction", "belief_risk_score_m"}
         else np.stack(values)
         for name, values in arrays.items()
     }
@@ -581,6 +640,13 @@ def run(
                 "uniform in [branch, floor(branch + maximum * "
                 "(last_h6_start - branch))]"
             ),
+            "belief_risk_gate": (
+                "accept visible; when missing require TCP net displacement "
+                "since last visible within configured bound"
+                if config.belief_risk_gate_maximum_tcp_net_displacement_m
+                is not None
+                else None
+            ),
         },
         "rows": expected_rows,
         "pairs": config.expected_pairs,
@@ -604,6 +670,20 @@ def run(
         "initial_layout_axis_error_degrees": {
             "median": float(np.median(initial_axis_errors)),
             "maximum": maximum_axis_error,
+        },
+        "belief_risk_gate": {
+            "enabled": (
+                config.belief_risk_gate_maximum_tcp_net_displacement_m
+                is not None
+            ),
+            "maximum_tcp_net_displacement_m": (
+                config.belief_risk_gate_maximum_tcp_net_displacement_m
+            ),
+            "accepted_rows": risk_accepted_count,
+            "rejected_rows": len(risk_rejected_rows),
+            "coverage": risk_accepted_count / expected_rows,
+            "rejected": risk_rejected_rows,
+            "privileged_error_used_for_gate": False,
         },
         "files": {},
     }

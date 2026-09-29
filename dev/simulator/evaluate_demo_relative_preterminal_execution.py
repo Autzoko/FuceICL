@@ -76,6 +76,12 @@ class PreterminalExecutionConfig:
     maximum_no_demo_action_absolute: float
     maximum_parameters: int
     maximum_two_forward_latency_p95_ms: float
+    expected_belief_risk_gate_maximum_tcp_net_displacement_m: (
+        float | None
+    ) = None
+    minimum_belief_risk_coverage: float = 1.0
+    minimum_belief_risk_progress_coverage: float = 1.0
+    minimum_belief_risk_pair_coverage: float = 1.0
 
     @classmethod
     def from_json(cls, path: Path) -> "PreterminalExecutionConfig":
@@ -120,9 +126,19 @@ class PreterminalExecutionConfig:
             self.minimum_raw_endpoint_improvement,
             self.minimum_wrong_endpoint_improvement,
             self.minimum_hold_endpoint_improvement,
+            self.minimum_belief_risk_coverage,
+            self.minimum_belief_risk_progress_coverage,
+            self.minimum_belief_risk_pair_coverage,
         )
         if any(not 0.0 < value <= 1.0 for value in probabilities):
             raise ValueError("execution fraction 必须位于 (0,1]")
+        if (
+            self.expected_belief_risk_gate_maximum_tcp_net_displacement_m
+            is not None
+            and self.expected_belief_risk_gate_maximum_tcp_net_displacement_m
+            <= 0.0
+        ):
+            raise ValueError("belief risk gate 位移门槛必须为正")
 
     @property
     def expected_data_sha256(self) -> str:
@@ -228,6 +244,27 @@ def run(
     )
     if scheduled_maximum != config.expected_progress_fraction_maximum:
         raise ValueError("fresh query progress 上界与预注册不一致")
+    expected_risk_threshold = (
+        config.expected_belief_risk_gate_maximum_tcp_net_displacement_m
+    )
+    risk_report = query_report.get("belief_risk_gate", {})
+    if expected_risk_threshold is not None:
+        if (
+            not risk_report.get("enabled", False)
+            or risk_report.get("maximum_tcp_net_displacement_m")
+            != expected_risk_threshold
+        ):
+            raise ValueError("fresh query belief risk gate 与预注册不一致")
+        if risk_report.get("privileged_error_used_for_gate", True):
+            raise ValueError("belief risk gate 错误使用 privileged error")
+        required = {"belief_risk_accepted", "belief_risk_score_m"}
+        if not required.issubset(query_data):
+            raise ValueError("fresh query 缺少 belief risk routing 字段")
+        if required & set(query_report.get("state_features", [])):
+            raise ValueError("belief risk routing 字段不得进入 Predictor state")
+        risk_accepted = query_data["belief_risk_accepted"].astype(bool)
+    else:
+        risk_accepted = np.ones(len(query_data["pair_id"]), dtype=bool)
     if set(query_data["seed"].tolist()) & set(bank_data["seed"].tolist()):
         raise ValueError("fresh query seed 与 Demo bank 重叠")
 
@@ -250,8 +287,22 @@ def run(
     query_audits: list[dict[str, Any]] = []
     latencies = []
     no_demo_action_maximum = 0.0
+    risk_audits = [
+        {
+            "valid": bool(risk_accepted[index]),
+            "pair_id": int(query_data["pair_id"][index]),
+            "progress_index": int(query_data["progress_index"][index]),
+        }
+        for index in range(len(risk_accepted))
+    ]
+    risk_coverage = _coverage(
+        risk_audits,
+        expected_progress_samples=config.expected_progress_samples,
+    )
     try:
         for query_index in range(len(query_data["pair_id"])):
+            if not risk_accepted[query_index]:
+                continue
             operation_id = int(query_data["operation_id"][query_index])
             operation = OPERATION_NAMES[operation_id]
             seed = int(query_data["seed"][query_index])
@@ -434,7 +485,13 @@ def run(
     parameters = sum(parameter.numel() for parameter in model.parameters())
     criteria = {
         "C1_evaluation_support": (
-            coverage["fraction"] >= config.minimum_valid_query_fraction
+            risk_coverage["fraction"]
+            >= config.minimum_belief_risk_coverage
+            and risk_coverage["minimum_progress_fraction"]
+            >= config.minimum_belief_risk_progress_coverage
+            and risk_coverage["minimum_pair_fraction"]
+            >= config.minimum_belief_risk_pair_coverage
+            and coverage["fraction"] >= config.minimum_valid_query_fraction
             and coverage["minimum_progress_fraction"]
             >= config.minimum_progress_valid_fraction
             and coverage["minimum_pair_fraction"]
@@ -473,6 +530,7 @@ def run(
         "protocol": {
             "execution": "expert-valid audit, then reset plus recorded prefix",
             "queries": len(query_data["pair_id"]),
+            "belief_risk_accepted_queries": int(risk_accepted.sum()),
             "fresh_pairs": config.expected_pairs,
             "progress_samples": config.expected_progress_samples,
             "progress_fraction_maximum": scheduled_maximum,
@@ -503,6 +561,7 @@ def run(
         "model_parameters": parameters,
         "two_forward_latency_ms": latency,
         "no_demo_action_maximum_absolute": no_demo_action_maximum,
+        "belief_risk_support": risk_coverage,
         "evaluation_support": coverage,
         "summaries": summaries,
         "progress_summaries": _progress_summaries(rows),

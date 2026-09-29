@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from dev.simulator.evaluate_demo_relative_preterminal_execution import _coverage
 from dev.simulator.preprocess_rotated_layout_slide_belief_chunks import (
     _belief_frames,
+    _belief_risk_accepted,
 )
 
 
@@ -38,3 +39,21 @@ def test_coverage_reports_progress_and_pair_minima() -> None:
     assert result["fraction"] == 0.75
     assert result["minimum_progress_fraction"] == 0.5
     assert result["minimum_pair_fraction"] == 0.5
+
+
+def test_belief_risk_gate_uses_only_visibility_and_tcp_displacement() -> None:
+    assert _belief_risk_accepted(
+        visible=True,
+        tcp_net_displacement_m=1.0,
+        maximum_tcp_net_displacement_m=0.01,
+    )
+    assert _belief_risk_accepted(
+        visible=False,
+        tcp_net_displacement_m=0.01,
+        maximum_tcp_net_displacement_m=0.01,
+    )
+    assert not _belief_risk_accepted(
+        visible=False,
+        tcp_net_displacement_m=0.010001,
+        maximum_tcp_net_displacement_m=0.01,
+    )
