@@ -1,0 +1,12 @@
+{
+  "schema_version": "visibility-conditioned-belief-v1",
+  "seed": 20261017,
+  "expected_pairs": 24,
+  "expected_camera_variant": "dual-fixed-v1",
+  "expected_source_report_sha256": "615c5c8c43176b802acb885c70ba6d18dac2ccf9369a081fd6e6abfbc7c69e58",
+  "bootstrap_samples": 10000,
+  "minimum_missing_trajectories": 8,
+  "maximum_tcp_oracle_gap_m": 0.002,
+  "maximum_combined_mean_error_m": 0.02,
+  "maximum_visible_centroid_error_m": 0.025
+}

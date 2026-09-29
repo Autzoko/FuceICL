@@ -3,8 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 import unittest
 
+import numpy as np
+
 from dev.simulator.evaluate_dual_view_observability import (
     DualViewObservabilityConfig,
+)
+from dev.simulator.evaluate_visibility_conditioned_belief import (
+    _paired_bootstrap,
 )
 from dev.simulator.prepare_rotated_layout_multiview_replay import (
     CAMERA_VARIANT,
@@ -52,6 +57,20 @@ class DualViewProtocolTest(unittest.TestCase):
                 minimum_fixed_progress_visible_fraction=1.0,
                 maximum_centroid_error_m=0.025,
             )
+
+    def test_paired_bootstrap_detects_uniform_improvement(self) -> None:
+        primary = np.asarray([0.01, 0.02, 0.03])
+        baseline = primary + 0.01
+
+        result = _paired_bootstrap(
+            primary,
+            baseline,
+            samples=100,
+            seed=7,
+        )
+
+        self.assertAlmostEqual(result["mean_m"], -0.01)
+        self.assertLess(result["ci95_high_m"], 0.0)
 
 
 if __name__ == "__main__":
