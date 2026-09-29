@@ -1,0 +1,15 @@
+{
+  "schema_version": "rotated-layout-slide-pair-pilot-v1",
+  "seeds": [13000000, 13000001, 13000002, 13000003],
+  "axis_yaw_degrees": [-60.0, -20.0, 20.0, 60.0],
+  "neutral_height_m": 0.12,
+  "contact_offset_m": 0.05,
+  "goal_standoff_m": 0.08,
+  "state_max_abs_tolerance": 1e-6,
+  "observation_max_abs_tolerance": 1e-6,
+  "minimum_branch_target_separation_m": 0.09,
+  "minimum_large_yaw_gap_degrees": 80.0,
+  "maximum_raw_large_gap_cosine": 0.2,
+  "minimum_transport_large_gap_cosine": 0.999,
+  "require_all_expert_success": true
+}
