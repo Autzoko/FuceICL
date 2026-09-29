@@ -525,7 +525,6 @@ def _protocol_options(task: TaskData) -> dict[str, Any]:
     }
 
 
-@torch.inference_mode()
 def run(
     *,
     project_root: Path,
