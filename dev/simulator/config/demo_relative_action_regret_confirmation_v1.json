@@ -1,0 +1,20 @@
+{
+  "schema_version": "demo-relative-action-regret-confirmation-v1",
+  "expected_data_sha256": "1363674fcd4bfd109fed30f5bde8e106460f86ad4643e83d55671684a362aeb9",
+  "expected_preprocess_report_sha256": "0eb67c02e78c7f81305a0941d30e5df5c98dcff3d990d69f8db7c90b3283c939",
+  "expected_training_report_sha256": "5217d823e034eddd41971099037eaac561dff052fb22dba7654f351bf762d73b",
+  "expected_checkpoint_sha256": "0b1b6974906bfa938b4689cb23b43a5cc88b73e969fa790f7bdf55c0df3ab0d6",
+  "seed": 20261017,
+  "bootstrap_resamples": 10000,
+  "ambiguous_progress_maximum": 1,
+  "minimum_ambiguous_queries": 40,
+  "minimum_raw_relative_improvement": 0.1,
+  "minimum_direction_accuracy": 0.95,
+  "minimum_wrong_relative_improvement": 0.8,
+  "minimum_shuffled_relative_improvement": 0.5,
+  "maximum_ambiguous_wrong_direction_accuracy": 0.1,
+  "maximum_parameters": 12000,
+  "latency_warmup": 200,
+  "latency_iterations": 2000,
+  "maximum_latency_p95_ms": 1.0
+}
