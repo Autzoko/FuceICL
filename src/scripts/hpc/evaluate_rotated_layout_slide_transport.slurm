@@ -8,9 +8,6 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
-source /etc/profile
-module purge
-module load miniconda/3-4.11.0
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"
@@ -18,6 +15,7 @@ readonly DATA_ROOT="${2:?predictor data root is required}"
 readonly CONFIG_PATH="${3:?transport baseline config is required}"
 readonly OUTPUT_PATH="${4:?new report path is required}"
 readonly PYTHON_BIN="/scratch/ll5582/conda/envs/FuseICL-maniskill/bin/python"
+export LD_LIBRARY_PATH="/scratch/ll5582/conda/envs/FuseICL-maniskill/lib:${LD_LIBRARY_PATH:-}"
 
 if [[ -e "${OUTPUT_PATH}" ]]; then
     echo "输出已存在，拒绝覆盖：${OUTPUT_PATH}" >&2

@@ -9,9 +9,6 @@
 #SBATCH --output=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.out
 #SBATCH --error=/scratch/ll5582/data/ManiSkill3/logs/%x-%j.err
 
-source /etc/profile
-module purge
-module load miniconda/3-4.11.0
 set -euo pipefail
 
 readonly PROJECT_ROOT="${1:?project root is required}"
@@ -21,6 +18,7 @@ readonly CONFIG_PATH="${4:?replay audit config is required}"
 readonly PYTHON_BIN="/scratch/ll5582/conda/envs/FuseICL-maniskill/bin/python"
 readonly CACHE_ROOT="/scratch/ll5582/.cache/fuceicl-maniskill"
 readonly REPLAY_COUNT="${5:-72}"
+export LD_LIBRARY_PATH="/scratch/ll5582/conda/envs/FuseICL-maniskill/lib:${LD_LIBRARY_PATH:-}"
 
 if [[ ! "${REPLAY_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
     echo "replay count 必须为正整数" >&2
