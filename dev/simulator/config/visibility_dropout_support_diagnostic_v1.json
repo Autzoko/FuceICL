@@ -1,0 +1,7 @@
+{
+  "schema_version": "visibility-dropout-support-audit-v1",
+  "expected_pairs": 48,
+  "action_horizon": 6,
+  "maximum_accepted_tcp_net_displacement_m": 0.01,
+  "minimum_positive_tcp_net_displacement_m": 0.000001
+}
