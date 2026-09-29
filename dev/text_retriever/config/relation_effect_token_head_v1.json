@@ -1,0 +1,18 @@
+{
+  "schema_version": "relation-effect-token-head-v1",
+  "seed": 20261010,
+  "attention_dim": 64,
+  "epochs": 250,
+  "batch_size": 64,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "early_stopping_patience": 30,
+  "parse_batch_size": 16,
+  "encode_batch_size": 64,
+  "max_length": 64,
+  "conformal_alpha": 0.05,
+  "minimum_validation_accuracy": 0.95,
+  "minimum_calibration_coverage": 0.95,
+  "minimum_calibration_singleton_rate": 0.8,
+  "maximum_parameters": 30000
+}

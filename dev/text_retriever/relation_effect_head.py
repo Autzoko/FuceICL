@@ -70,6 +70,79 @@ class RelationEffectHead(nn.Module):
         )
 
 
+@dataclass(frozen=True)
+class TokenRelationEffectHeadConfig:
+    """Token attention relation head 的容量定义。"""
+
+    embedding_dim: int = EMBEDDING_DIM
+    attention_dim: int = 64
+    classes: int = len(RELATION_LABELS)
+
+    def __post_init__(self) -> None:
+        if min(self.embedding_dim, self.attention_dim, self.classes) <= 0:
+            raise ValueError("token relation head 维度必须为正")
+        if self.classes != len(RELATION_LABELS):
+            raise ValueError(
+                "token relation head classes 与固定标签数量不一致"
+            )
+
+
+class TokenRelationEffectHead(nn.Module):
+    """在 frozen contextual tokens 上学习关系敏感的注意力池化。"""
+
+    def __init__(
+        self,
+        config: TokenRelationEffectHeadConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.config = config or TokenRelationEffectHeadConfig()
+        self.attention = nn.Sequential(
+            nn.Linear(self.config.embedding_dim, self.config.attention_dim),
+            nn.Tanh(),
+            nn.Linear(self.config.attention_dim, 1),
+        )
+        # 同时保留 learned pooling 与稳定 mean pooling；分类层仍保持线性。
+        self.classifier = nn.Linear(
+            2 * self.config.embedding_dim,
+            self.config.classes,
+        )
+
+    def pool(
+        self,
+        token_embeddings: torch.Tensor,
+        token_mask: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回 attention/mean 拼接特征及可审计 token 权重。"""
+        if token_embeddings.ndim != 3:
+            raise ValueError("token_embeddings shape 必须为 [B,L,D]")
+        if token_mask.shape != token_embeddings.shape[:2]:
+            raise ValueError("token_mask shape 必须为 [B,L]")
+        if token_embeddings.shape[2] != self.config.embedding_dim:
+            raise ValueError("token embedding dimension 错误")
+        mask = token_mask.to(torch.bool)
+        if not bool(mask.any(dim=1).all()):
+            raise ValueError("每个样本至少需要一个有效 token")
+        if not bool(torch.isfinite(token_embeddings).all()):
+            raise ValueError("token embeddings 含 NaN/Inf")
+        scores = self.attention(token_embeddings).squeeze(-1)
+        scores = scores.masked_fill(~mask, float("-inf"))
+        weights = torch.softmax(scores, dim=1)
+        attended = torch.sum(weights.unsqueeze(-1) * token_embeddings, dim=1)
+        mask_float = mask.unsqueeze(-1).to(token_embeddings.dtype)
+        mean = torch.sum(mask_float * token_embeddings, dim=1)
+        mean = mean / mask_float.sum(dim=1).clamp_min(1.0)
+        return torch.cat((attended, mean), dim=1), weights
+
+    def forward(
+        self,
+        token_embeddings: torch.Tensor,
+        token_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """返回 `[B,3]` logits。"""
+        features, _ = self.pool(token_embeddings, token_mask)
+        return self.classifier(features)
+
+
 def mask_object_spans(parsed: ParsedInstruction) -> str:
     """用统一占位符替换 GLiNER object spans，保留谓词和关系结构。"""
     spans = sorted(

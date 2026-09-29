@@ -9,6 +9,8 @@ import torch
 from dev.text_retriever.relation_effect_head import (
     RelationEffectHead,
     RelationEffectHeadConfig,
+    TokenRelationEffectHead,
+    TokenRelationEffectHeadConfig,
     conformal_quantile,
     conformal_sets,
     singleton_predictions,
@@ -44,6 +46,31 @@ class RelationEffectHeadTest(unittest.TestCase):
         masked = mask_object_spans(parsed)
 
         self.assertEqual(masked, "Move the [OBJECT] toward the [OBJECT] .")
+
+    def test_token_head_masks_padding_and_normalizes_attention(self) -> None:
+        model = TokenRelationEffectHead(
+            TokenRelationEffectHeadConfig(attention_dim=32)
+        )
+        tokens = torch.randn(3, 7, 384)
+        mask = torch.tensor(
+            [
+                [1, 1, 1, 1, 0, 0, 0],
+                [1, 1, 1, 1, 1, 0, 0],
+                [1, 1, 1, 1, 1, 1, 1],
+            ],
+            dtype=torch.bool,
+        )
+
+        logits = model(tokens, mask)
+        _, weights = model.pool(tokens, mask)
+
+        self.assertEqual(logits.shape, (3, 3))
+        self.assertTrue(torch.allclose(weights.sum(dim=1), torch.ones(3)))
+        self.assertEqual(float(weights[~mask].abs().max().detach()), 0.0)
+        self.assertLess(
+            sum(parameter.numel() for parameter in model.parameters()),
+            30_000,
+        )
 
     def test_split_conformal_sets_cover_calibration_labels(self) -> None:
         probabilities = torch.tensor(
