@@ -1,4 +1,4 @@
-"""审计双向滑块共同前缀后的观测等价性、动作分离与 expert 成功。"""
+"""审计双向滑块共同前缀后的观测等价性、动作分离和 expert 成功。"""
 
 from __future__ import annotations
 
@@ -38,6 +38,8 @@ class PairPilotConfig:
     seeds: list[int]
     neutral_height_m: float
     contact_offset_m: float
+    left_goal_standoff_m: float
+    right_goal_standoff_m: float
     state_max_abs_tolerance: float
     observation_max_abs_tolerance: float
     minimum_branch_target_separation_m: float
@@ -57,6 +59,8 @@ class PairPilotConfig:
         positive = (
             self.neutral_height_m,
             self.contact_offset_m,
+            self.left_goal_standoff_m,
+            self.right_goal_standoff_m,
             self.state_max_abs_tolerance,
             self.observation_max_abs_tolerance,
             self.minimum_branch_target_separation_m,
@@ -74,7 +78,7 @@ class BranchRecord:
     object_pose: np.ndarray
     tcp_pose: np.ndarray
     observation: dict[str, np.ndarray]
-    contact_target: np.ndarray
+    branch_target: np.ndarray
     goal_position: np.ndarray
     success: bool
 
@@ -158,12 +162,14 @@ def _run_operation(
         branch_observation = _flatten_observation(base.get_obs())
         if any("goal" in key.lower() for key in branch_observation):
             raise RuntimeError("predictor observation 泄漏 goal 字段")
-        prefix_steps = int(_single(base.elapsed_steps))
+        prefix_steps = int(np.asarray(_single(base.elapsed_steps)).reshape(-1)[0])
         direction = float(base.operation_direction)
-        contact_position = object_position.copy()
-        contact_position[0] -= direction * config.contact_offset_m
-        contact_pose = sapien.Pose(
-            p=contact_position,
+        # 第一个 operation-dependent waypoint 只沿 x 侧移，避免共同 z 分量
+        # 掩盖左右动作的方向差异。
+        branch_position = neutral_position.copy()
+        branch_position[0] -= direction * config.contact_offset_m
+        branch_pose = sapien.Pose(
+            p=branch_position,
             q=np.asarray(base.agent.tcp.pose.sp.q),
         )
         record = BranchRecord(
@@ -174,14 +180,26 @@ def _run_operation(
             object_pose=_single(base.obj.pose.raw_pose).astype(np.float64),
             tcp_pose=_single(base.agent.tcp.pose.raw_pose).astype(np.float64),
             observation=branch_observation,
-            contact_target=contact_position,
+            branch_target=branch_position,
             goal_position=_single(base.goal_region.pose.p).astype(np.float64),
             success=False,
+        )
+        _move_or_raise(planner, branch_pose, f"{operation} side-hover pose")
+        contact_position = branch_position.copy()
+        contact_position[2] = object_position[2]
+        contact_pose = sapien.Pose(
+            p=contact_position,
+            q=np.asarray(base.agent.tcp.pose.sp.q),
         )
         _move_or_raise(planner, contact_pose, f"{operation} contact pose")
         goal_position = np.asarray(base.goal_region.pose.sp.p, dtype=np.float64)
         final_position = goal_position.copy()
-        final_position[0] -= direction * config.contact_offset_m
+        standoff = (
+            config.right_goal_standoff_m
+            if operation == "right"
+            else config.left_goal_standoff_m
+        )
+        final_position[0] -= direction * standoff
         final_pose = sapien.Pose(
             p=final_position,
             q=np.asarray(base.agent.tcp.pose.sp.q),
@@ -226,8 +244,8 @@ def _compare_pair(
         "tcp_pose": _maximum_absolute_error(left.tcp_pose, right.tcp_pose),
     }
     branch_state = 0.5 * (left.tcp_pose[:3] + right.tcp_pose[:3])
-    left_delta = left.contact_target - branch_state
-    right_delta = right.contact_target - branch_state
+    left_delta = left.branch_target - branch_state
+    right_delta = right.branch_target - branch_state
     return {
         "seed": left.seed,
         "common_prefix_steps": {
@@ -243,8 +261,8 @@ def _compare_pair(
             default=float("inf"),
         ),
         "observation_leaf_errors": observation_errors,
-        "branch_contact_target_separation_m": float(
-            np.linalg.norm(left.contact_target - right.contact_target)
+        "branch_target_separation_m": float(
+            np.linalg.norm(left.branch_target - right.branch_target)
         ),
         "branch_target_delta_cosine": float(
             np.dot(left_delta, right_delta)
@@ -283,7 +301,7 @@ def run(
         pair["observation_max_abs_error"] for pair in pairs
     )
     minimum_separation = min(
-        pair["branch_contact_target_separation_m"] for pair in pairs
+        pair["branch_target_separation_m"] for pair in pairs
     )
     criteria = {
         "p1_shared_prefix_length": all(
@@ -321,7 +339,7 @@ def run(
             "pairs": len(pairs),
             "state_max_abs_error": state_maximum,
             "observation_max_abs_error": observation_maximum,
-            "minimum_branch_contact_target_separation_m": minimum_separation,
+            "minimum_branch_target_separation_m": minimum_separation,
             "success_rate": float(
                 np.mean(
                     [

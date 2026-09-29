@@ -3,6 +3,8 @@
   "seeds": [10000000, 10000001, 10000002, 10000003],
   "neutral_height_m": 0.12,
   "contact_offset_m": 0.05,
+  "left_goal_standoff_m": 0.05,
+  "right_goal_standoff_m": 0.12,
   "state_max_abs_tolerance": 1e-6,
   "observation_max_abs_tolerance": 1e-6,
   "minimum_branch_target_separation_m": 0.09,
