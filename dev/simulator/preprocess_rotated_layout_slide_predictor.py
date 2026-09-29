@@ -140,7 +140,10 @@ def _state(
         raise ValueError("Panda qpos/qvel 必须为 9D")
     rotation = _quaternion_wxyz_to_matrix(tcp_pose[3:7])
     active_in_eef = rotation.T @ (active_center - tcp_pose[:3])
-    layout_in_eef = rotation.T @ (anchor_center - active_center)
+    # 两个物体均放置在已标定桌面上；去除单视角可见表面的 z 质心偏差。
+    layout_world = anchor_center - active_center
+    layout_world[2] = 0.0
+    layout_in_eef = rotation.T @ layout_world
     value = np.concatenate(
         (
             active_in_eef,
