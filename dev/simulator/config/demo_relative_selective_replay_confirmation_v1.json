@@ -1,0 +1,14 @@
+{
+  "schema_version": "rotated-layout-slide-replay-audit-v1",
+  "expected_pairs": 48,
+  "action_horizon": 6,
+  "action_difference_tolerance": 0.000001,
+  "observation_tolerance": 0.000001,
+  "source_qpos_alignment_tolerance_rad": 0.05,
+  "minimum_direction_valid_fraction": 0.95,
+  "maximum_controller_direction_cosine": -0.8,
+  "minimum_controller_direction_separation": 0.2,
+  "maximum_tcp_direction_cosine": -0.8,
+  "minimum_tcp_direction_separation_m": 0.005,
+  "minimum_median_observation_only_mse_lower_bound": 0.0001
+}
