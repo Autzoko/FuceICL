@@ -80,6 +80,21 @@ class DemoRelativeActionPredictorTest(unittest.TestCase):
     def test_policy_remains_lightweight(self) -> None:
         self.assertEqual(self.policy.parameter_count, 10_916)
 
+    def test_request_owns_tensor_copies(self) -> None:
+        query = self.query.clone()
+        demo = self.demo.clone()
+        action = self.action.clone()
+        context = PreparedRawDemoContext("copy", demo, action)
+        request = DemoRelativeActionChunkRequest(query, context)
+
+        query.zero_()
+        demo.zero_()
+        action.zero_()
+
+        torch.testing.assert_close(request.query_state, self.query)
+        torch.testing.assert_close(request.demo.state, self.demo)
+        torch.testing.assert_close(request.demo.raw_action, self.action)
+
 
 if __name__ == "__main__":
     unittest.main()

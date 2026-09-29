@@ -24,11 +24,19 @@ class PreparedRawDemoContext:
         if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
             raise ValueError("candidate_id 不能为空")
         object.__setattr__(self, "candidate_id", self.candidate_id.strip())
-        _finite_floating_tensor(self.state, name="state", dimensions=1)
-        _finite_floating_tensor(
-            self.raw_action,
-            name="raw_action",
-            dimensions=2,
+        object.__setattr__(
+            self,
+            "state",
+            _finite_floating_tensor(self.state, name="state", dimensions=1),
+        )
+        object.__setattr__(
+            self,
+            "raw_action",
+            _finite_floating_tensor(
+                self.raw_action,
+                name="raw_action",
+                dimensions=2,
+            ),
         )
         if self.retrieval_distance is not None and (
             isinstance(self.retrieval_distance, bool)
@@ -47,10 +55,14 @@ class DemoRelativeActionChunkRequest:
     demo: PreparedRawDemoContext | None
 
     def __post_init__(self) -> None:
-        _finite_floating_tensor(
-            self.query_state,
-            name="query_state",
-            dimensions=1,
+        object.__setattr__(
+            self,
+            "query_state",
+            _finite_floating_tensor(
+                self.query_state,
+                name="query_state",
+                dimensions=1,
+            ),
         )
         if self.demo is not None and not isinstance(
             self.demo, PreparedRawDemoContext

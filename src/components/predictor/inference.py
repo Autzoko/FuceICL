@@ -15,13 +15,14 @@ def _finite_floating_tensor(
     *,
     name: str,
     dimensions: int,
-) -> None:
+) -> torch.Tensor:
     if not isinstance(value, torch.Tensor) or not value.is_floating_point():
         raise TypeError(f"{name} 必须是浮点 Tensor")
     if value.ndim != dimensions:
         raise ValueError(f"{name} 必须是 {dimensions}D Tensor")
     if not bool(torch.isfinite(value).all()):
         raise ValueError(f"{name} 含 NaN/Inf")
+    return value.detach().clone()
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,19 @@ class PreparedDemoContext:
         if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
             raise ValueError("candidate_id 不能为空")
         object.__setattr__(self, "candidate_id", self.candidate_id.strip())
-        _finite_floating_tensor(self.state, name="state", dimensions=1)
-        _finite_floating_tensor(
-            self.transported_action,
-            name="transported_action",
-            dimensions=2,
+        object.__setattr__(
+            self,
+            "state",
+            _finite_floating_tensor(self.state, name="state", dimensions=1),
+        )
+        object.__setattr__(
+            self,
+            "transported_action",
+            _finite_floating_tensor(
+                self.transported_action,
+                name="transported_action",
+                dimensions=2,
+            ),
         )
         if self.retrieval_score is not None and (
             isinstance(self.retrieval_score, bool)
@@ -60,10 +69,14 @@ class ActionChunkRequest:
     demo: PreparedDemoContext | None
 
     def __post_init__(self) -> None:
-        _finite_floating_tensor(
-            self.query_state,
-            name="query_state",
-            dimensions=1,
+        object.__setattr__(
+            self,
+            "query_state",
+            _finite_floating_tensor(
+                self.query_state,
+                name="query_state",
+                dimensions=1,
+            ),
         )
         if self.demo is not None and not isinstance(
             self.demo, PreparedDemoContext
