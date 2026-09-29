@@ -1,0 +1,20 @@
+{
+  "schema_version": "bidirectional-slide-demo-transport-v1",
+  "seed": 20261011,
+  "rank": 4,
+  "maximum_translation_residual_m": 0.001,
+  "epochs": 250,
+  "batch_size": 256,
+  "learning_rate": 0.01,
+  "weight_decay": 0.0001,
+  "gradient_clip_norm": 1.0,
+  "state_std_floor": 1e-5,
+  "bootstrap_resamples": 5000,
+  "minimum_validation_relative_improvement": 0.05,
+  "minimum_test_direction_accuracy": 0.9,
+  "maximum_wrong_demo_direction_accuracy": 0.1,
+  "maximum_parameters": 1000,
+  "latency_warmup": 200,
+  "latency_iterations": 2000,
+  "maximum_latency_p95_ms": 1.0
+}
